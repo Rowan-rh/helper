@@ -1,0 +1,7 @@
+{
+  "base_url": "https://api.minimax.cn/v1",
+  "api_key": "",
+  "model": "MiniMax-M3",
+  "timeout_seconds": 30,
+  "max_tokens": 2048
+}
