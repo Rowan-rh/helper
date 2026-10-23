@@ -42,6 +42,60 @@ class LLMTests(unittest.TestCase):
         self.assertEqual(payload["thinking"], {"type": "disabled"})
         self.assertEqual(call.call_args.kwargs["timeout"], 20)
 
+    def test_minimax_official_endpoint(self):
+        client = LLMClient({**self.options, "base_url": "https://api.minimax.cn/v1", "model": "MiniMax-M3"})
+        with patch("wxbot_framework.llm.urlopen", return_value=self.response('{"reply":"好的"}')) as call:
+            self.assertEqual(client.complete_json("只返回 JSON", "测试"), {"reply": "好的"})
+        request = call.call_args.args[0]
+        self.assertEqual(request.full_url, "https://api.minimax.cn/v1/chat/completions")
+        self.assertEqual(request.get_header("Authorization"), "Bearer dummy-test-key")
+        payload = json.loads(request.data)
+        self.assertEqual(payload["model"], "MiniMax-M3")
+        self.assertNotIn("response_format", payload)
+        self.assertEqual(payload["thinking"], {"type": "disabled"})
+
+    def test_minimax_requires_explicit_model(self):
+        with self.assertRaises(ValueError):
+            LLMClient({"api_key": "dummy-test-key", "base_url": "https://api.minimax.cn/v1"})
+
+    def test_json_extracted_from_wrapped_model_text(self):
+        for content in ('好的，结果如下：{"reply":"在的"} 请查收',
+                        '```json\n{"reply":"在的"}\n```',
+                        '前文 {“坏”:1} 干扰 {"reply":"在的"}',
+                        '他说"{你好}"然后 {"reply":"在的"}'):
+            with self.subTest(content=content), patch("wxbot_framework.llm.urlopen",
+                                                      return_value=self.response(content)):
+                self.assertEqual(self.client.complete_json("JSON", "测试"), {"reply": "在的"})
+        with patch("wxbot_framework.llm.urlopen", return_value=self.response("缺 { 未闭合的正文")):
+            with self.assertRaises(LLMError):
+                self.client.complete_json("JSON", "测试")
+
+    def test_thinking_and_reasoning_effort_options(self):
+        options = {**self.options, "base_url": "https://api.minimax.cn/v1", "model": "MiniMax-M3.1-Flash",
+                   "disable_thinking": False, "reasoning_effort": "low"}
+        with patch("wxbot_framework.llm.urlopen", return_value=self.response('{"ok":1}')) as call:
+            self.assertEqual(LLMClient(options).complete_json("JSON", "测试"), {"ok": 1})
+        payload = json.loads(call.call_args.args[0].data)
+        self.assertNotIn("thinking", payload)
+        self.assertEqual(payload["reasoning_effort"], "low")
+        for change in ({"disable_thinking": "no"}, {"reasoning_effort": "none"}, {"reasoning_effort": 3}):
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                LLMClient({**options, **change})
+
+    def test_inline_thinking_stripped_before_parse(self):
+        cases = {'<think>先想想 {"干扰":1}</think>\n{"reply":"在的"}': {"reply": "在的"},
+                 '<THINK>考虑中…</THINK>{"reply":"在的"}': {"reply": "在的"},
+                 '回答前 <think>没写完': None,
+                 '<think>只有思考</think>': None}
+        for content, expected in cases.items():
+            with self.subTest(content=content), patch("wxbot_framework.llm.urlopen",
+                                                      return_value=self.response(content)):
+                if expected is None:
+                    with self.assertRaises(LLMError):
+                        self.client.complete_json("JSON", "测试")
+                else:
+                    self.assertEqual(self.client.complete_json("JSON", "测试"), expected)
+
     def test_config_from_utf8_bom_file(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "llm.json"

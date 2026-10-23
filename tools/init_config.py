@@ -19,4 +19,9 @@ def initialize(root=ROOT):
 
 if __name__ == '__main__':
     created = initialize()
-    print('已生成：' + '、'.join(created) if created else '本地配置已存在，未覆盖。')
+    if created:
+        print('已生成：' + '、'.join(created))
+        if 'llm_config.json' in created:
+            print('默认模板为 DeepSeek 接口；使用 MiniMax 官方接口可参考 llm_config.minimax.example.json。')
+    else:
+        print('本地配置已存在，未覆盖。')
