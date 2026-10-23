@@ -56,6 +56,8 @@ def make_message(text, *, sender=NORMAL_USER, room=ROOM, bot_generated=False):
 class AgentToolsTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
+        # addCleanup 后进先出：临时目录最先注册，最后删除，sqlite 句柄一定先关闭。
+        self.addCleanup(self.temp_dir.cleanup)
         self.root = Path(self.temp_dir.name)
         self.runtime_dir = self.root / ".runtime"
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
@@ -81,12 +83,9 @@ class AgentToolsTests(unittest.TestCase):
         self.member_store = MemberStore(self.config_file, ACCOUNT)
         self.member_store.initialize()
         self.memory_store = GroupMemoryStore(self.db_path, ACCOUNT, runtime_root=self.root)
+        self.addCleanup(self.member_store.close)
+        self.addCleanup(self.memory_store.close)
         self.registry = create_agent_tool_registry()
-
-    def tearDown(self):
-        self.memory_store.close()
-        self.member_store.close()
-        self.temp_dir.cleanup()
 
     def _context(self, *, sender_id=NORMAL_USER, is_vip=False, is_self=False, is_group=True, room=ROOM, extras=None):
         extra_map = {"memory_store": self.memory_store}
@@ -313,6 +312,8 @@ class AgentToolsTests(unittest.TestCase):
         """AC-6：定长长期记忆读写、满额策展、斜杠命令管理与不混入总结。"""
         cfg = MemoryConfig(max_entries=2, max_entry_chars=50, max_total_chars=100)
         store = GroupMemoryStore(self.db_path, ACCOUNT, runtime_root=self.root, config=cfg)
+        # 临时 store 也要关闭：Windows 上未关闭的句柄会让临时目录删不掉。
+        self.addCleanup(store.close)
         ctx = self._context(is_vip=True, extras={"memory_store": store})
         executor = ToolExecutor(self.registry, ctx, AgentConfig())
 

@@ -25,6 +25,8 @@ ROOM, CAT, ROBOT, OTHER_ROOM, OTHER = daily.ROOM, daily.CAT, daily.ROBOT, daily.
 class PersonalityTests(unittest.TestCase):
     setUp = daily.DailySummaryTests.setUp
     tearDown = daily.DailySummaryTests.tearDown
+    # new_store 与临时目录清理都在 test_chat_summary 里用 addCleanup 统一登记：
+    # 成员目录的 sqlite 句柄先关闭，临时目录后删除，Windows 上不会残留占用。
     new_store = daily.DailySummaryTests.new_store
     message = daily.DailySummaryTests.message
     model = daily.DailySummaryTests.model

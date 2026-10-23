@@ -32,15 +32,14 @@ NORMAL_SENDER = "wxid_normal_user"
 class MemoryTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
+        # addCleanup 后进先出：临时目录最先注册，最后删除，sqlite 句柄一定先关闭。
+        self.addCleanup(self.temp_dir.cleanup)
         self.root = Path(self.temp_dir.name)
         self.runtime_dir = self.root / ".runtime"
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         self.db_path = self.runtime_dir / "member_data.sqlite3"
         self.store = GroupMemoryStore(self.db_path, ACCOUNT, runtime_root=self.root)
-
-    def tearDown(self):
-        self.store.close()
-        self.temp_dir.cleanup()
+        self.addCleanup(self.store.close)
 
     def test_database_path_must_be_under_runtime_directory(self):
         # 位于项目 .runtime 下的路径合法
@@ -148,6 +147,8 @@ class MemoryTests(unittest.TestCase):
     def test_capacity_limits_and_no_auto_eviction(self):
         small_config = MemoryConfig(max_entries=3, max_entry_chars=50, max_total_chars=100)
         store = GroupMemoryStore(self.db_path, ACCOUNT, runtime_root=self.root, config=small_config)
+        # 临时 store 也要关闭：Windows 上未关闭的句柄会让临时目录删不掉。
+        self.addCleanup(store.close)
 
         store.add(ACCOUNT, ROOM, "条目一")
         store.add(ACCOUNT, ROOM, "条目二")
