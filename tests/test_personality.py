@@ -25,6 +25,8 @@ ROOM, CAT, ROBOT, OTHER_ROOM, OTHER = daily.ROOM, daily.CAT, daily.ROBOT, daily.
 class PersonalityTests(unittest.TestCase):
     setUp = daily.DailySummaryTests.setUp
     tearDown = daily.DailySummaryTests.tearDown
+    # new_store 与临时目录清理都在 test_chat_summary 里用 addCleanup 统一登记：
+    # 成员目录的 sqlite 句柄先关闭，临时目录后删除，Windows 上不会残留占用。
     new_store = daily.DailySummaryTests.new_store
     message = daily.DailySummaryTests.message
     model = daily.DailySummaryTests.model
@@ -354,6 +356,7 @@ class NativeAtReceiveTests(unittest.TestCase):
         self.assertEqual(strip_at_labels("@机器 人\u2005@小明\u2005请看看这句话"), "请看看这句话")
         self.assertEqual(strip_at_labels("普通 @example.com 文本"), "普通 @example.com 文本")
 
+    @unittest.skipUnless(sys.platform == "win32", "本机 Windows ABI 检查")
     def test_native_metadata_marks_only_actual_robot_group_at(self):
         native = daily.ROOT / "native"
         if str(native) not in sys.path:

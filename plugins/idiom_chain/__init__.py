@@ -38,7 +38,8 @@ class Chain:
 class Game:
     opening: str
     latest: Chain
-    started_at: float = field(default_factory=time.monotonic)
+    # 与 sdk.Message.received_at 保持同一时钟（perf_counter，分辨率足够区分同刻度事件）。
+    started_at: float = field(default_factory=time.perf_counter)
     mode: str = "independent"
     players: dict = field(default_factory=dict)
     shared: Chain | None = None
@@ -101,7 +102,7 @@ class Plugin:
                 ctx.reply(message, "暂时无法向大模型获取成语，请稍后再发“成语接龙”。", delivery_guard=guard)
                 return
             if ctx.reply(message, opening, delivery_guard=guard):
-                self.games[message.chat_id] = Game(opening, Chain(opening, (opening,), time.monotonic()))
+                self.games[message.chat_id] = Game(opening, Chain(opening, (opening,), time.perf_counter()))
             return
         if text == "合并接龙":
             if not game:
@@ -113,7 +114,7 @@ class Plugin:
             current = game.latest
             if ctx.reply(message, current.current, delivery_guard=guard):
                 game.mode = "merged"
-                game.shared = Chain(current.current, current.used, time.monotonic())
+                game.shared = Chain(current.current, current.used, time.perf_counter())
                 game.players.clear()
             return
         if not game or not text or text.startswith("/"):
@@ -142,7 +143,7 @@ class Plugin:
         name = self.member_names.get(message.chat_id, {}).get(message.sender_id)
         sent = ctx.reply_at(message, response, display_name=name, delivery_guard=guard) if game.mode == "independent" else ctx.reply(message, response, delivery_guard=guard)
         if sent:
-            updated = Chain(following, used, time.monotonic())
+            updated = Chain(following, used, time.perf_counter())
             if game.mode == "independent":
                 game.players[message.sender_id] = updated
             else:

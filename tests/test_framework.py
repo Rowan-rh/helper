@@ -64,6 +64,9 @@ class FrameworkTests(unittest.TestCase):
     def setUp(self):
         self.previous_logging = logging.root.manager.disable
         logging.disable(logging.CRITICAL)
+        # setUp 抛错时 tearDown 不会执行，全局日志禁用状态会泄漏到其他用例，
+        # 因此用 addCleanup 恢复，而不是依赖 tearDown。
+        self.addCleanup(logging.disable, self.previous_logging)
         SCRATCH.mkdir(parents=True, exist_ok=True)
         self.temporary = tempfile.TemporaryDirectory(dir=SCRATCH)
         self.root = Path(self.temporary.name).resolve()
@@ -93,7 +96,6 @@ class FrameworkTests(unittest.TestCase):
         # 递归清理只针对本测试创建、已核对位于工作区的临时目录。
         self.assertTrue(self.root.resolve().is_relative_to(SCRATCH.resolve()))
         self.temporary.cleanup()
-        logging.disable(self.previous_logging)
 
     def write_config(self):
         self.path.write_text(json.dumps(self.config, ensure_ascii=False), encoding="utf-8")
@@ -245,6 +247,7 @@ class FrameworkTests(unittest.TestCase):
             app.stop_event.set()
             thread.join(3)
 
+    @unittest.skipUnless(sys.platform == "win32", "本机 Windows 进程锁检查")
     def test_single_instance_lock_is_released(self):
         path = self.root / "bot.lock"
         with InstanceLock(path):

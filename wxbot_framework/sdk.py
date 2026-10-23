@@ -32,7 +32,9 @@ class Message:
     is_self: bool = False
     sequence: int = 0
     session_id: str = ""
-    received_at: float = field(default_factory=time.monotonic)
+    # 统一用 perf_counter：Windows 的 time.monotonic 只有 15.6ms 刻度，
+    # 同刻度内的事件无法排序；插件比较时间时必须与这里保持同一时钟。
+    received_at: float = field(default_factory=time.perf_counter)
     data: Mapping[str, Any] = field(default_factory=dict, repr=False)
 
     @classmethod

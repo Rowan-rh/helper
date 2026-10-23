@@ -42,6 +42,8 @@ class DailySummaryTests(unittest.TestCase):
         scratch = ROOT / ".runtime/tests"
         scratch.mkdir(parents=True, exist_ok=True)
         self.temporary = tempfile.TemporaryDirectory(dir=scratch)
+        # addCleanup 后进先出：临时目录最先注册，最后删除，sqlite 句柄一定先关闭。
+        self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
         self.now = datetime(2026, 10, 10, 15, 59, 59, tzinfo=timezone.utc)  # 北京 23:59:59
         options = {"database_file": "data.sqlite3", "history_enabled": True, "daily_clear": True,
@@ -66,13 +68,14 @@ class DailySummaryTests(unittest.TestCase):
 
     def tearDown(self):
         self.service.close()
-        for store in self.stores:
-            store.close()
+        # 递归清理只针对本测试创建、已核对位于工作区的临时目录。
         self.assertTrue(self.root.resolve().is_relative_to((ROOT / ".runtime/tests").resolve()))
-        self.temporary.cleanup()
+        # 临时目录删除与成员目录句柄关闭由 addCleanup 统一处理（后进先出）。
 
     def new_store(self, account=ROBOT):
         store = MemberStore(self.path, account, now=lambda: self.now)
+        # 句柄关闭必须早于临时目录删除，否则 Windows 上删目录会报 WinError 32。
+        self.addCleanup(store.close)
         self.stores.append(store)
         store.initialize()
         return store
