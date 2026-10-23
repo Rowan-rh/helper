@@ -535,11 +535,17 @@ class Agent:
         self.registry = registry if registry is not None else ToolRegistry()
         self.clock = clock
 
-    def _check(self, guard, deadline):
+    def _check_guard(self, guard):
         if guard is not None and guard() is False:
             raise SnapshotExpired("会话已清空、跨天或人格已切换")
+
+    def _check_deadline(self, deadline):
         if self.clock() >= deadline:
             raise AgentTimeout("本次对话超出总时间预算")
+
+    def _check(self, guard, deadline):
+        self._check_guard(guard)
+        self._check_deadline(deadline)
 
     @staticmethod
     def _assistant_message(result, calls):
@@ -596,7 +602,13 @@ class Agent:
                 logger.warning("大模型接口不支持工具调用，本次降级为普通多轮对话")
                 tools, degraded, loop_messages = None, True, []
                 continue
-            self._check(guard, deadline)
+            except LLMError as error:
+                if offer is None and loop_messages and "HTTP 400" in str(error):
+                    logger.warning("收敛请求遭遇 HTTP 400，兜底剥离 tool 消息降级为普通多轮重试")
+                    tools, degraded, loop_messages = None, True, []
+                    continue
+                raise
+            self._check_guard(guard)
             calls = list(result.tool_calls or ()) if offer is not None else []
             if not calls:
                 reply = (result.content or "").strip()
@@ -606,6 +618,7 @@ class Agent:
                 logger.debug("Agent 完成：requests=%d tools=%d degraded=%s stored=%s",
                              requests, len(executor.executed), degraded, stored)
                 return AgentReply(reply, requests, tuple(executor.executed), degraded, stored)
+            self._check_deadline(deadline)
             tool_round += 1
             for index, call in enumerate(calls):
                 if not call.get("id"):

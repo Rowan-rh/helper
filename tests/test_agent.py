@@ -443,6 +443,33 @@ class AgentLoopTests(unittest.TestCase):
             agent.run(request("你好"))
         self.assertEqual(len(agent.store), 0)
 
+    def test_complete_reply_after_deadline_is_not_discarded(self):
+        # 请求耗时较长超出截止时间，但模型已返回完整回复且 guard 有效时，不应因超时抛弃
+        def slow_text(messages, tools):
+            self.clock.now += 50
+            return text_reply("完整回复")
+
+        agent = self.agent(FakeLLM(slow_text))
+        reply = agent.run(request("你好"))
+        self.assertEqual(reply.text, "完整回复")
+        self.assertTrue(reply.stored)
+        self.assertEqual(len(agent.store), 1)
+
+    def test_convergence_round_http_400_fallback(self):
+        # 第 4 次收敛请求遭遇 HTTP 400 时，剥离 tool 消息降级为普通多轮重试
+        llm = FakeLLM(
+            tool_reply(call("get_group_status", {}, "c1")),
+            tool_reply(call("get_group_status", {}, "c2")),
+            tool_reply(call("get_group_status", {}, "c3")),
+            LLMError("HTTP 400: tool message rejected without tools"),
+            text_reply("兜底成功回复"),
+        )
+        agent = self.agent(llm)
+        reply = agent.run(request("查询群状态"))
+        self.assertEqual(reply.text, "兜底成功回复")
+        self.assertTrue(reply.degraded)
+        self.assertEqual(reply.rounds, 5)
+
     def test_system_prompt_persona_memory_background_and_missing_ids(self):
         llm = FakeLLM(tool_reply(call("get_group_status", {}, "")), text_reply("好"), text_reply("再好"))
         snapshots = []
