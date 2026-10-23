@@ -247,6 +247,7 @@ class FrameworkTests(unittest.TestCase):
             app.stop_event.set()
             thread.join(3)
 
+    @unittest.skipUnless(sys.platform == "win32", "本机 Windows 进程锁检查")
     def test_single_instance_lock_is_released(self):
         path = self.root / "bot.lock"
         with InstanceLock(path):

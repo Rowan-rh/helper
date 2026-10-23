@@ -356,6 +356,7 @@ class NativeAtReceiveTests(unittest.TestCase):
         self.assertEqual(strip_at_labels("@机器 人\u2005@小明\u2005请看看这句话"), "请看看这句话")
         self.assertEqual(strip_at_labels("普通 @example.com 文本"), "普通 @example.com 文本")
 
+    @unittest.skipUnless(sys.platform == "win32", "本机 Windows ABI 检查")
     def test_native_metadata_marks_only_actual_robot_group_at(self):
         native = daily.ROOT / "native"
         if str(native) not in sys.path:

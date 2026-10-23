@@ -66,6 +66,7 @@ class TextRoutingTests(unittest.TestCase):
             self.assertTrue(data["is_self"])
             self.assertEqual(data["msg"], text)
 
+    @unittest.skipUnless(sys.platform == "win32", "本机 Windows ABI 检查")
     def test_native_service_skips_recent_bot_text_but_allows_players(self):
         if str(NATIVE) not in sys.path:
             sys.path.insert(0, str(NATIVE))
