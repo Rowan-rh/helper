@@ -1,5 +1,5 @@
 {
   "api": "v1",
-  "description": "真实艾特机器人后，按群人格回复并携带发言者前十条上下文",
-  "requires": ["group.text.receive", "group.text.send", "group.text.mention"]
+  "description": "Agent 对话入口：群聊艾特多轮对话与工具调用、私聊 VIP 与文件传输助手 /ai",
+  "requires": ["text.receive", "text.send"]
 }
