@@ -46,7 +46,7 @@ python tools/init_config.py
 }
 ```
 
-3. `llm_config.json`：填写自己的 `api_key`、`base_url` 和 `model`。模板保留 DeepSeek 接口格式，密钥为空。
+3. `llm_config.json`：填写自己的 `api_key`、`base_url` 和 `model`。模板保留 DeepSeek 接口格式，密钥为空。也支持 MiniMax 官方接口（国内 `https://api.minimax.cn/v1`，海外 `https://api.minimax.io/v1`），参考 `llm_config.minimax.example.json`，注意：`model` 必须明确填写（如 `MiniMax-M3`）；MiniMax 端点不支持 JSON 输出模式，框架会用提示词约束并从回复文本中提取 JSON；M2 系列和 M3.1-Flash 无法关闭思考且思考计入 `max_tokens`，需把 `max_tokens` 调大（如 2048），M3.1-Flash 也不能与关闭思考参数同用。
 4. 模板默认关闭需要模型的 `idiom_chain`、`chat_summary`、`mention_chat` 插件。填写模型配置后，把它们的 `enabled` 改为 `true`。
 
 账号 ID 必须是实际微信 ID；群 ID 以 `@chatroom` 结尾。`test` 消息会由 `id_responder` 插件回复当前会话 ID，`chats` 控制台命令可以列出本次连接收到消息的会话。所有示例 ID 和测试用名称均为虚构数据。
