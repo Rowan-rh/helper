@@ -13,7 +13,6 @@ from wxbot_framework.agent import (
     AgentRequest,
 )
 from wxbot_framework.agent_tools import create_agent_tool_registry
-from wxbot_framework.dialogue import Dialogue
 from wxbot_framework.llm import LLMError
 from wxbot_framework.members import BEIJING, SnapshotExpired
 from wxbot_framework.memory import GroupMemoryStore, execute_memory_command
@@ -24,25 +23,24 @@ from wxbot_framework.summary import split_text
 
 class Plugin:
     def on_load(self, ctx):
-        self.members = getattr(ctx, "members", None)
-        if self.members is not None and not self.members.history_enabled:
+        self.members = ctx.members
+        if not self.members.history_enabled:
             raise ValueError("艾特上下文对话需要 history_enabled: true")
         ctx.llm  # 启动时核对配置，不请求接口。
 
         self.agent_config = AgentConfig.from_options(ctx.config.get("agent"))
         self.conversation_store = ConversationStore.from_config(self.agent_config)
 
-        if self.members is not None:
-            runtime_root = Path(__file__).resolve().parent.parent.parent
-            try:
-                if not self.members.path.is_relative_to(runtime_root / ".runtime"):
-                    if (self.members.config_file.parent / ".runtime").is_dir() and self.members.path.is_relative_to(self.members.config_file.parent / ".runtime"):
-                        runtime_root = self.members.config_file.parent
-                self.memory_store = GroupMemoryStore(self.members.path, self.members.account,
-                                                     runtime_root=runtime_root)
-            except Exception:
-                self.memory_store = None
-        else:
+        runtime_root = Path(__file__).resolve().parent.parent.parent
+        try:
+            # 若测试环境或自定义运行目录将数据库置于非默认路径（如 tempdir/.runtime），回退至该配置文件的父目录作为 runtime_root
+            if not self.members.path.is_relative_to(runtime_root / ".runtime"):
+                if (self.members.config_file.parent / ".runtime").is_dir() and self.members.path.is_relative_to(self.members.config_file.parent / ".runtime"):
+                    runtime_root = self.members.config_file.parent
+            self.memory_store = GroupMemoryStore(self.members.path, self.members.account,
+                                                 runtime_root=runtime_root)
+        except Exception as error:
+            ctx.logger.warning("长期记忆存储初始化失败，记忆功能已停用：%s", type(error).__name__)
             self.memory_store = None
 
         self.tool_registry = create_agent_tool_registry()
@@ -74,7 +72,7 @@ class Plugin:
         if is_filehelper:
             if message.data.get("bot_generated"):
                 return
-            account = self.members.account if self.members else ""
+            account = self.members.account
             if not (getattr(message, "is_self", False) or message.sender_id == account):
                 return
             raw_text = message.text.strip()
@@ -121,7 +119,7 @@ class Plugin:
         if not message.is_group:
             if message.data.get("bot_generated"):
                 return
-            if not self.members or not self.members.is_vip(message.sender_id):
+            if not self.members.is_vip(message.sender_id):
                 return
             account = self.members.account
             raw_text = message.text.strip()
@@ -144,15 +142,16 @@ class Plugin:
 
         # ------------------------------------------------ 3. 群聊入口
         if message.is_group:
-            if not self.members or message.chat_id not in self.members.groups:
+            if message.chat_id not in self.members.groups:
                 return
             account = self.members.account
             raw_text = message.text.strip()
 
             # /清空：清理当前群多轮会话，不截断后续 chat_records 插件
-            words = raw_text.split(maxsplit=1)
+            words = raw_text.split()
             if words and words[0] == "/清空":
-                self.conversation_store.clear_chat(account, message.chat_id)
+                if len(words) == 1:
+                    self.conversation_store.clear_chat(account, message.chat_id)
                 return
 
             # 记忆与重置命令
@@ -209,49 +208,34 @@ class Plugin:
             guard = lambda: bool(self.members.snapshot_is_current(snapshot) and self.members.personality_is_current(personality))
             delivery_guard = lambda: ctx.response_guard(snapshot, personality)
 
-            # 单元测试与兼容性兜底：若 LLM 客户端仅 Mock 了 complete_json，回退至原有 Dialogue
-            llm_inst = getattr(ctx, "llm", None)
-            use_legacy = False
-            if type(llm_inst).__name__ in ("Mock", "MagicMock"):
-                cc = getattr(llm_inst, "complete_chat", None)
-                if cc is not None and type(cc).__name__ in ("Mock", "MagicMock"):
-                    if cc.side_effect is None and type(cc.return_value).__name__ in ("Mock", "MagicMock"):
-                        use_legacy = True
-            elif not hasattr(llm_inst, "complete_chat") and hasattr(llm_inst, "complete_json"):
-                use_legacy = True
-
-            if use_legacy:
-                reply = personality_text(Dialogue(ctx.llm_for(message, personality=personality)).reply(snapshot),
-                                         personality.name)
-            else:
-                user_text = strip_at_labels(snapshot.current).strip()
-                background = tuple(strip_at_labels(row["text"]) for row in snapshot.messages)
-                context = ToolContext(
-                    account=self.members.account,
-                    room=message.chat_id,
-                    sender_id=message.sender_id,
-                    is_vip=self.members.is_vip(message.sender_id),
-                    is_self=message.sender_id == self.members.account,
-                    is_group=True,
-                    store=self.members,
-                    extras={
-                        "memory_store": self.memory_store,
-                        "filler_words": self.agent_config.filler_words,
-                    }
-                )
-                request = AgentRequest(
-                    key=key,
-                    generation=generation,
-                    text=user_text,
-                    context=context,
-                    persona=persona_prompt,
-                    memory_snapshot=(lambda: self.memory_store.snapshot_text(self.members.account, message.chat_id)) if self.memory_store else None,
-                    background=background,
-                    guard=guard,
-                )
-                agent = Agent(ctx.llm, store=self.conversation_store, registry=self.tool_registry, config=self.agent_config)
-                agent_reply = agent.run(request)
-                reply = personality_text(agent_reply.text, personality.name)
+            user_text = strip_at_labels(snapshot.current).strip()
+            background = tuple(strip_at_labels(row["text"]) for row in snapshot.messages)
+            context = ToolContext(
+                account=self.members.account,
+                room=message.chat_id,
+                sender_id=message.sender_id,
+                is_vip=self.members.is_vip(message.sender_id),
+                is_self=message.sender_id == self.members.account,
+                is_group=True,
+                store=self.members,
+                extras={
+                    "memory_store": self.memory_store,
+                    "filler_words": self.agent_config.filler_words,
+                }
+            )
+            request = AgentRequest(
+                key=key,
+                generation=generation,
+                text=user_text,
+                context=context,
+                persona=persona_prompt,
+                memory_snapshot=(lambda: self.memory_store.snapshot_text(self.members.account, message.chat_id)) if self.memory_store else None,
+                background=background,
+                guard=guard,
+            )
+            agent = Agent(ctx.llm, store=self.conversation_store, registry=self.tool_registry, config=self.agent_config)
+            agent_reply = agent.run(request)
+            reply = personality_text(agent_reply.text, personality.name)
 
             display = self.members.display_name(message.sender_id, message.chat_id) or snapshot.speaker_name
             budget = 1023 - len(("@" + display + "\u2005\n").encode("utf-8"))
@@ -301,7 +285,7 @@ class Plugin:
             reply = agent_reply.text
             for part in split_text(reply, byte_limit=1023):
                 ctx.reply(message, part)
-            ctx.logger.info("私聊对话完成：peer=%s rounds=%d", message.chat_id, agent_reply.rounds)
+            ctx.logger.info("私聊对话完成：rounds=%d", agent_reply.rounds)
         except SnapshotExpired:
             ctx.logger.info("私聊对话已取消")
         except LLMError as error:
@@ -309,7 +293,7 @@ class Plugin:
             ctx.reply(message, "暂时无法回复，请稍后再试。")
 
     def _run_filehelper_agent(self, message, ctx, question, today):
-        account = self.members.account if self.members else ""
+        account = self.members.account
         key = SessionKey.filehelper(account)
         generation = (today, 0)
         context = ToolContext(

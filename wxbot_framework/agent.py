@@ -603,7 +603,7 @@ class Agent:
                 tools, degraded, loop_messages = None, True, []
                 continue
             except LLMError as error:
-                if offer is None and loop_messages and "400" in str(error):
+                if offer is None and loop_messages and "HTTP 400" in str(error):
                     logger.warning("收敛请求遭遇 HTTP 400，兜底剥离 tool 消息降级为普通多轮重试")
                     tools, degraded, loop_messages = None, True, []
                     continue

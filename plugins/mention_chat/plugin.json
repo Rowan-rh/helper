@@ -1,5 +1,13 @@
 {
   "api": "v1",
   "description": "Agent 对话入口：群聊艾特多轮对话与工具调用、私聊 VIP 与文件传输助手 /ai",
-  "requires": ["text.receive", "text.send"]
+  "requires": [
+    "text.receive",
+    "text.send",
+    "friend.text.receive",
+    "friend.text.send",
+    "group.text.receive",
+    "group.text.send",
+    "group.text.mention"
+  ]
 }

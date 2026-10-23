@@ -119,7 +119,8 @@ class AgentEntryTests(unittest.TestCase):
             "mention_chat",
             {"agent": {"total_budget": 10.0, "max_turns": 10}},
             self.service,
-            ["text.receive", "text.send", "group.text.mention"],
+            ["text.receive", "text.send", "friend.text.receive", "friend.text.send",
+             "group.text.receive", "group.text.send", "group.text.mention"],
             member_store=self.member_store,
         )
         self.ctx._llm = self.llm
@@ -420,3 +421,60 @@ class AgentEntryTests(unittest.TestCase):
         self.assertEqual(len(tool_executed), 1)
         self.assertEqual(tool_executed[0], {"ok": False, "error": "非群会话"})
         self.assertIn("私聊无法查看群聊上下文", self.backend.sent[-1][1])
+
+    def test_mention_request_cancels_when_personality_switched_during_call(self):
+        """请求进行中切换人格，guard 失效，旧人格回复被丢弃且不发送。"""
+        self.member_store.set_personality(ROOM_1, "嘴臭")
+
+        def fake_complete(messages, tools=None):
+            # 模型请求期间外部切换人格
+            self.member_store.set_personality(ROOM_1, "卑微")
+            return ChatResult("旧人格回复内容")
+
+        self.llm.responses = [fake_complete]
+        msg = self.record_and_make_group_at("请求中切换人格", room=ROOM_1, sequence=110)
+        self.plugin.on_message(msg, self.ctx)
+
+        # 验证没有发出任何消息
+        self.assertEqual(len(self.backend.sent), 0)
+
+    def test_mention_request_cancels_when_clear_during_call(self):
+        """请求进行中群聊记录被清空，guard 失效，回复被丢弃且不发送。"""
+        def fake_complete(messages, tools=None):
+            # 模型请求期间外部执行群清空
+            self.member_store.clear(ROOM_1)
+            return ChatResult("清空前的回复内容")
+
+        self.llm.responses = [fake_complete]
+        msg = self.record_and_make_group_at("请求中清空记录", room=ROOM_1, sequence=111)
+        self.plugin.on_message(msg, self.ctx)
+
+        # 验证没有发出任何消息
+        self.assertEqual(len(self.backend.sent), 0)
+
+    def test_group_clear_command_with_arguments_does_not_clear_conversation(self):
+        """群聊收到 /清空 xxx（带参数）时不清除多轮对话，只有单独的 /清空 才会清理。"""
+        self.llm.responses = [ChatResult("第一轮回复")]
+        msg1 = self.record_and_make_group_at("第一轮消息", room=ROOM_1, sequence=112)
+        self.plugin.on_message(msg1, self.ctx)
+        snap = self.member_store.conversation_snapshot(msg1)
+        key = SessionKey.group(ACCOUNT, ROOM_1, NORMAL_USER)
+        history = self.plugin.conversation_store.history(key, (snap.day, snap.generation))
+        self.assertEqual(len(history), 1)
+
+        # 发送带参数的 /清空 123：不应清空会话
+        arg_clear = Message("/清空 123", ROOM_1, NORMAL_USER, is_group=True, session_id="test_session_1")
+        self.plugin.on_message(arg_clear, self.ctx)
+        self.assertEqual(len(self.plugin.conversation_store.history(key, (snap.day, snap.generation))), 1)
+
+        # 发送标准 /清空：应清空该群会话
+        exact_clear = Message("/清空", ROOM_1, NORMAL_USER, is_group=True, session_id="test_session_1")
+        self.plugin.on_message(exact_clear, self.ctx)
+        self.assertEqual(len(self.plugin.conversation_store.history(key, (snap.day, snap.generation))), 0)
+
+    def test_empty_or_markdown_slop_reply_handles_safely(self):
+        """空回复或经人格清洗后为空时安全捕获并降级提示，不崩溃。"""
+        self.llm.responses = [ChatResult("")]
+        msg = self.record_and_make_group_at("空回复测试", room=ROOM_1, sequence=113)
+        self.plugin.on_message(msg, self.ctx)
+        self.assertIn("暂时无法回复", self.backend.sent[-1][1])
