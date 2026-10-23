@@ -167,12 +167,12 @@ def handle_get_member_recent_messages(context: ToolContext, arguments: dict) -> 
             })
 
     if not found_member:
-        return {"ok": False, "error": f"未找到成员“{member_name}”"}
+        return {"ok": False, "error": f"未找到成员“{sanitize_text(member_name)}”"}
 
     result_msgs = matched[-limit:]
     return {
         "ok": True,
-        "member_name": member_name,
+        "member_name": sanitize_text(member_name),
         "data": result_msgs,
         "count": len(result_msgs),
     }

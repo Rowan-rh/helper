@@ -19,14 +19,26 @@ from typing import Any
 from .account import validate_account
 
 
-def validate_runtime_db_path(path: str | Path) -> Path:
-    """强校验数据库路径必须位于 .runtime/ 目录下。"""
+def validate_runtime_db_path(path: str | Path, runtime_root: str | Path) -> Path:
+    """强校验数据库路径必须位于项目 runtime_root 下的 .runtime/ 目录中。"""
     if not path or not isinstance(path, (str, Path)) or "\0" in str(path):
         raise ValueError("数据库路径必须为有效字符串或 Path")
+    if not runtime_root or not isinstance(runtime_root, (str, Path)) or "\0" in str(runtime_root):
+        raise ValueError("runtime_root 必须为有效字符串或 Path")
+    root_resolved = Path(runtime_root).resolve()
+    expected_runtime_dir = (root_resolved / ".runtime").resolve()
     resolved = Path(path).resolve()
-    # 路径的非末尾父级目录中必须包含 '.runtime'
-    if ".runtime" not in resolved.parts[:-1]:
-        raise ValueError(f"数据库路径必须位于 .runtime/ 目录下: {resolved}")
+    try:
+        is_rel = resolved.is_relative_to(expected_runtime_dir)
+    except AttributeError:
+        # 兼容 Python < 3.9，尽管当前为 3.13
+        try:
+            resolved.relative_to(expected_runtime_dir)
+            is_rel = True
+        except ValueError:
+            is_rel = False
+    if not is_rel or resolved == expected_runtime_dir:
+        raise ValueError(f"数据库路径必须位于项目 .runtime/ 目录下: {resolved} (runtime_dir={expected_runtime_dir})")
     return resolved
 
 
@@ -58,9 +70,16 @@ class MemoryEntry:
 class GroupMemoryStore:
     """管理 group_memories 表的长期记忆存储。"""
 
-    def __init__(self, db_path: str | Path, account: str, config: MemoryConfig | None = None):
+    def __init__(
+        self,
+        db_path: str | Path,
+        account: str,
+        runtime_root: str | Path,
+        config: MemoryConfig | None = None,
+    ):
         self.account = validate_account(account)
-        self.path = validate_runtime_db_path(db_path)
+        self.runtime_root = Path(runtime_root).resolve()
+        self.path = validate_runtime_db_path(db_path, self.runtime_root)
         self.config = config if config is not None else MemoryConfig()
         self._lock = threading.RLock()
         self._db = None
@@ -93,8 +112,13 @@ class GroupMemoryStore:
             db.close()
             raise
 
+    def _check_account(self, account: str) -> None:
+        if account != self.account:
+            raise ValueError(f"account 不匹配: 预期 {self.account}，传入 {account}")
+
     def list_memories(self, account: str, room: str) -> tuple[MemoryEntry, ...]:
         """按编号升序列出指定会话的全部长期记忆。"""
+        self._check_account(account)
         with self._lock:
             db = self._connection()
             rows = db.execute(
@@ -116,6 +140,7 @@ class GroupMemoryStore:
 
     def add(self, account: str, room: str, content: str, created_by: str = "") -> dict:
         """新增记忆，内容去重，满额不淘汰旧条目，幂等返回。"""
+        self._check_account(account)
         text = content.strip() if isinstance(content, str) else ""
         if not text:
             return {"ok": False, "error": "记忆内容不能为空"}
@@ -183,6 +208,7 @@ class GroupMemoryStore:
 
     def replace(self, account: str, room: str, entry_id: int, content: str, created_by: str = "") -> dict:
         """替换指定编号的记忆，内容去重，总字数受控，幂等返回。"""
+        self._check_account(account)
         if type(entry_id) is not int or entry_id < 1:
             return {"ok": False, "error": "entry_id 应为正整数"}
         text = content.strip() if isinstance(content, str) else ""
@@ -255,6 +281,7 @@ class GroupMemoryStore:
 
     def delete(self, account: str, room: str, entry_id: int) -> dict:
         """删除指定编号的记忆，幂等操作。"""
+        self._check_account(account)
         if type(entry_id) is not int or entry_id < 1:
             return {"ok": False, "error": "entry_id 应为正整数"}
 
@@ -277,6 +304,7 @@ class GroupMemoryStore:
 
     def clear(self, account: str, room: str) -> int:
         """清空指定会话的全部记忆，返回清除条数。"""
+        self._check_account(account)
         with self._lock:
             db = self._connection()
             with db:
@@ -288,6 +316,7 @@ class GroupMemoryStore:
 
     def snapshot_text(self, account: str, room: str) -> str:
         """只读快照文本，格式如：\n#1 每周五晚 20:00 读书分享\n#2 小明海鲜过敏，聚餐避开海鲜"""
+        self._check_account(account)
         entries = self.list_memories(account, room)
         if not entries:
             return ""

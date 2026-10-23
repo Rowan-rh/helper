@@ -32,32 +32,51 @@ NORMAL_SENDER = "wxid_normal_user"
 class MemoryTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
-        self.runtime_dir = Path(self.temp_dir.name) / ".runtime"
+        self.root = Path(self.temp_dir.name)
+        self.runtime_dir = self.root / ".runtime"
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         self.db_path = self.runtime_dir / "member_data.sqlite3"
-        self.store = GroupMemoryStore(self.db_path, ACCOUNT)
+        self.store = GroupMemoryStore(self.db_path, ACCOUNT, runtime_root=self.root)
 
     def tearDown(self):
         self.store.close()
         self.temp_dir.cleanup()
 
     def test_database_path_must_be_under_runtime_directory(self):
-        # 位于 .runtime 下的路径合法
-        self.assertEqual(validate_runtime_db_path(self.db_path), self.db_path.resolve())
+        # 位于项目 .runtime 下的路径合法
+        self.assertEqual(validate_runtime_db_path(self.db_path, self.root), self.db_path.resolve())
 
         # 不在 .runtime 下的路径被强校验拒绝
-        bad_path = Path(self.temp_dir.name) / "outside.sqlite3"
+        bad_path = self.root / "outside.sqlite3"
         with self.assertRaises(ValueError) as ctx:
-            validate_runtime_db_path(bad_path)
+            validate_runtime_db_path(bad_path, self.root)
         self.assertIn(".runtime", str(ctx.exception))
 
         # 文件名为 .runtime 但没有 .runtime 父目录的路径也被拒绝
         with self.assertRaises(ValueError):
-            validate_runtime_db_path(Path(self.temp_dir.name) / ".runtime")
+            validate_runtime_db_path(self.root / ".runtime", self.root)
 
         # 尝试使用不合法路径初始化 Store
         with self.assertRaises(ValueError):
-            GroupMemoryStore(bad_path, ACCOUNT)
+            GroupMemoryStore(bad_path, ACCOUNT, runtime_root=self.root)
+
+        # 反例测试 1：项目外的 .runtime 路径会被拒绝
+        with tempfile.TemporaryDirectory() as other_dir:
+            other_root = Path(other_dir)
+            other_runtime = other_root / ".runtime"
+            other_runtime.mkdir(parents=True, exist_ok=True)
+            outside_runtime_db = other_runtime / "member_data.sqlite3"
+            with self.assertRaises(ValueError):
+                validate_runtime_db_path(outside_runtime_db, self.root)
+            with self.assertRaises(ValueError):
+                GroupMemoryStore(outside_runtime_db, ACCOUNT, runtime_root=self.root)
+
+        # 反例测试 2：用 .. 跳出项目 .runtime 的路径也会被拒绝
+        traversal_path = self.runtime_dir / ".." / "escaped.sqlite3"
+        with self.assertRaises(ValueError):
+            validate_runtime_db_path(traversal_path, self.root)
+        with self.assertRaises(ValueError):
+            GroupMemoryStore(traversal_path, ACCOUNT, runtime_root=self.root)
 
     def test_memory_config_validation(self):
         cfg = MemoryConfig(max_entries=30, max_entry_chars=150, max_total_chars=4000)
@@ -128,7 +147,7 @@ class MemoryTests(unittest.TestCase):
 
     def test_capacity_limits_and_no_auto_eviction(self):
         small_config = MemoryConfig(max_entries=3, max_entry_chars=50, max_total_chars=100)
-        store = GroupMemoryStore(self.db_path, ACCOUNT, config=small_config)
+        store = GroupMemoryStore(self.db_path, ACCOUNT, runtime_root=self.root, config=small_config)
 
         store.add(ACCOUNT, ROOM, "条目一")
         store.add(ACCOUNT, ROOM, "条目二")
@@ -209,13 +228,17 @@ class MemoryTests(unittest.TestCase):
         self.store.add(ACCOUNT, ROOM, "群1记忆")
         self.store.add(ACCOUNT, OTHER_ROOM, "群2记忆")
 
-        other_store = GroupMemoryStore(self.db_path, OTHER_ACCOUNT)
+        other_store = GroupMemoryStore(self.db_path, OTHER_ACCOUNT, runtime_root=self.root)
         other_store.add(OTHER_ACCOUNT, ROOM, "账号2记忆")
 
         # 隔离校验
         self.assertEqual([m.content for m in self.store.list_memories(ACCOUNT, ROOM)], ["群1记忆"])
         self.assertEqual([m.content for m in self.store.list_memories(ACCOUNT, OTHER_ROOM)], ["群2记忆"])
         self.assertEqual([m.content for m in other_store.list_memories(OTHER_ACCOUNT, ROOM)], ["账号2记忆"])
+
+        # 校验 account 不一致时抛出 ValueError
+        with self.assertRaises(ValueError):
+            self.store.list_memories("wxid_mismatch", ROOM)
 
         # 清空群1
         count = self.store.clear(ACCOUNT, ROOM)

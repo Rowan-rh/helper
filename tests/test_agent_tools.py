@@ -80,7 +80,7 @@ class AgentToolsTests(unittest.TestCase):
 
         self.member_store = MemberStore(self.config_file, ACCOUNT)
         self.member_store.initialize()
-        self.memory_store = GroupMemoryStore(self.db_path, ACCOUNT)
+        self.memory_store = GroupMemoryStore(self.db_path, ACCOUNT, runtime_root=self.root)
         self.registry = create_agent_tool_registry()
 
     def tearDown(self):
@@ -193,6 +193,21 @@ class AgentToolsTests(unittest.TestCase):
         self.assertFalse(res_nf["ok"])
         self.assertIn("未找到成员", res_nf["error"])
 
+        # 传入 wxid 和 @chatroom 形式的 member_name 时，返回中不得包含这两种格式
+        res_leak_1 = executor.execute({"id": "call_3", "name": "get_member_recent_messages", "arguments": {"member_name": "wxid_secret123"}})
+        self.assertNotIn("wxid_secret123", res_leak_1)
+        self.assertNotIn("wxid_", res_leak_1)
+        parsed_1 = json.loads(res_leak_1)
+        self.assertFalse(parsed_1["ok"])
+        self.assertIn("[微信ID]", parsed_1["error"])
+
+        res_leak_2 = executor.execute({"id": "call_4", "name": "get_member_recent_messages", "arguments": {"member_name": "secret_group@chatroom"}})
+        self.assertNotIn("secret_group@chatroom", res_leak_2)
+        self.assertNotIn("@chatroom", res_leak_2)
+        parsed_2 = json.loads(res_leak_2)
+        self.assertFalse(parsed_2["ok"])
+        self.assertIn("[群聊]", parsed_2["error"])
+
     def test_list_group_members(self):
         self.member_store.record(make_message("发言", sender=NORMAL_USER))
         ctx = self._context()
@@ -297,7 +312,7 @@ class AgentToolsTests(unittest.TestCase):
     def test_ac6_memory_full_commands_and_summary_isolation(self):
         """AC-6：定长长期记忆读写、满额策展、斜杠命令管理与不混入总结。"""
         cfg = MemoryConfig(max_entries=2, max_entry_chars=50, max_total_chars=100)
-        store = GroupMemoryStore(self.db_path, ACCOUNT, config=cfg)
+        store = GroupMemoryStore(self.db_path, ACCOUNT, runtime_root=self.root, config=cfg)
         ctx = self._context(is_vip=True, extras={"memory_store": store})
         executor = ToolExecutor(self.registry, ctx, AgentConfig())
 
