@@ -133,7 +133,22 @@ class IdiomPluginTests(unittest.TestCase):
     def test_help_and_primary_phone_commands(self):
         self.send("/help", is_self=True)
         self.assertEqual(self.ctx.sent[-1][1], HELP)
-        self.assertEqual(HELP, "1. 成语接龙\n\n2. /绑定 昵称\n\n3. /总结 昵称\n\n4. /总结群聊\n\n5. /切换人格 嘴臭|卑微|夸夸|取消\n\n6. 艾特机器人对话\n\n7. /清空\n\n8. /help")
+        expected_help = (
+            "1. 成语接龙\n\n"
+            "2. /绑定 昵称\n\n"
+            "3. /总结 昵称\n\n"
+            "4. /总结群聊\n\n"
+            "5. /切换人格 嘴臭|卑微|夸夸|取消\n\n"
+            "6. 艾特机器人对话\n\n"
+            "7. /ai 问题（文件传输助手）\n\n"
+            "8. /重置对话\n\n"
+            "9. /记忆\n\n"
+            "10. /删除记忆 N\n\n"
+            "11. /清空记忆\n\n"
+            "12. /清空\n\n"
+            "13. /help"
+        )
+        self.assertEqual(HELP, expected_help)
         self.assertLessEqual(len(HELP.encode("utf-8")), 1023)
         self.send("成语接龙", is_self=True)
         self.assertEqual(self.ctx.sent[-1][1], "一心一意")

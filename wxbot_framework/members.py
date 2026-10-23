@@ -89,6 +89,15 @@ class MemberStore:
         self.daily_clear = options.get("daily_clear", False)
         if type(self.daily_clear) is not bool:
             raise MemberError("daily_clear 必须是布尔值")
+        vip_raw = options.get("agent_vip_wxids", [])
+        if not isinstance(vip_raw, (list, tuple)):
+            raise MemberError("agent_vip_wxids 应为列表")
+        vip_set = set()
+        for item in vip_raw:
+            if not isinstance(item, str) or not item.strip():
+                raise MemberError("agent_vip_wxids 成员应为非空微信 ID")
+            vip_set.add(item.strip())
+        self.agent_vip_wxids = frozenset(vip_set)
         self._now = now or (lambda: datetime.now(timezone.utc))
         self._active_day = None
         self.groups = set(options["groups"])
@@ -132,6 +141,11 @@ class MemberStore:
         if not config.get("wechat_account"):
             raise MemberError("启用成员目录需要固定 wechat_account，以隔离各机器人账号的数据")
         return cls(Path(directory) / filename, config["wechat_account"])
+
+    def is_vip(self, wxid):
+        if not wxid or not isinstance(wxid, str):
+            return False
+        return wxid.strip() in self.agent_vip_wxids
 
     def _connection(self):
         if self._closed:
