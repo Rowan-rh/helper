@@ -48,7 +48,7 @@ def inspect(root, private_markers=()):
                for marker in private_markers):
             findings.append({'file':label,'kind':'known_private_marker'})
     findings.extend({'file':name,'kind':'runtime_or_legacy_directory'} for name in sorted(forbidden_dirs))
-    for name in ('bot_config','members_config','llm_config'):
+    for name in ('bot_config', 'members_config', 'llm_config', 'mcp_config'):
         template = root / (name + '.example.json')
         if not template.is_file():
             findings.append({'file':template.name,'kind':'missing_config_template'})
@@ -68,6 +68,56 @@ def inspect(root, private_markers=()):
         path=root/filename
         if path.exists() and json.loads(path.read_text(encoding='utf-8')).get('api_key'):
             findings.append({'file':filename,'kind':'nonempty_api_key'})
+    valid_env_placeholder = re.compile(r'\$\{[A-Za-z_][A-Za-z0-9_]*\}')
+    for filename in ('mcp_config.json', 'mcp_config.example.json'):
+        path = root / filename
+        if not path.exists():
+            continue
+        try:
+            data = json.loads(path.read_text(encoding='utf-8'))
+        except Exception:
+            continue
+        if not isinstance(data, dict):
+            continue
+        if filename == 'mcp_config.example.json':
+            enabled = bool(data.get('enabled'))
+            ws = data.get('web_search')
+            if isinstance(ws, dict) and ws.get('enabled'):
+                enabled = True
+            servers = data.get('mcp_servers')
+            if isinstance(servers, dict):
+                for srv in servers.values():
+                    if isinstance(srv, dict) and srv.get('enabled'):
+                        enabled = True
+                        break
+            if enabled:
+                findings.append({'file': filename, 'kind': 'enabled_in_config_template'})
+        ws = data.get('web_search')
+        if isinstance(ws, dict):
+            api_key = ws.get('api_key')
+            if isinstance(api_key, str) and api_key.strip():
+                if not valid_env_placeholder.fullmatch(api_key.strip()):
+                    findings.append({'file': filename, 'kind': 'nonempty_api_key'})
+        servers = data.get('mcp_servers')
+        if isinstance(servers, dict):
+            has_secret = False
+            for srv in servers.values():
+                if not isinstance(srv, dict):
+                    continue
+                for mapping_key in ('headers', 'env'):
+                    mapping = srv.get(mapping_key)
+                    if isinstance(mapping, dict):
+                        for val in mapping.values():
+                            if isinstance(val, str) and val.strip():
+                                if not valid_env_placeholder.search(val):
+                                    has_secret = True
+                                    break
+                    if has_secret:
+                        break
+                if has_secret:
+                    break
+            if has_secret:
+                findings.append({'file': filename, 'kind': 'nonempty_mcp_secret'})
     return {'passed':not findings,'files_scanned':count,'bytes_scanned':total,'findings':findings}
 
 

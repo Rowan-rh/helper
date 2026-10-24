@@ -1,0 +1,46 @@
+{
+  "enabled": false,
+  "web_search": {
+    "enabled": false,
+    "provider": "tavily",
+    "base_url": "https://api.tavily.com",
+    "api_key": "",
+    "timeout_seconds": 10.0,
+    "max_results": 5,
+    "max_result_chars": 3000
+  },
+  "mcp_servers": {
+    "example_remote_search": {
+      "enabled": false,
+      "transport": "streamable_http",
+      "url": "https://mcp.example.com/mcp",
+      "headers": {
+        "Authorization": "Bearer ${REMOTE_MCP_TOKEN}"
+      },
+      "access": "public",
+      "allow_in_group": true,
+      "read_only": true,
+      "timeout_seconds": 10.0,
+      "max_result_chars": 4000
+    },
+    "example_local_stdio": {
+      "enabled": false,
+      "transport": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-everything"
+      ],
+      "env": {
+        "API_KEY": "${LOCAL_MCP_API_KEY}"
+      },
+      "cwd": null,
+      "access": "self",
+      "allow_in_group": false,
+      "read_only": false,
+      "allow_write": false,
+      "timeout_seconds": 10.0,
+      "max_result_chars": 4000
+    }
+  }
+}

@@ -50,7 +50,8 @@ python tools/init_config.py
 ```
 
 3. `llm_config.json`：填写自己的 `api_key`、`base_url` 和 `model`。模板保留 DeepSeek 接口格式，密钥为空。也支持 MiniMax 官方接口（国内 `https://api.minimax.cn/v1`，海外 `https://api.minimax.io/v1`），参考 `llm_config.minimax.example.json`，注意：`model` 必须明确填写（如 `MiniMax-M3`）；MiniMax 端点不支持 JSON 输出模式，框架会用提示词约束并从回复文本中提取 JSON；M2 系列和 M3.1-Flash 无法关闭思考且思考计入 `max_tokens`，需把 `max_tokens` 调大（如 2048），M3.1-Flash 也不能与关闭思考参数同用。
-4. 模板默认关闭需要模型的 `idiom_chain`、`chat_summary`、`mention_chat` 插件。填写模型配置后，把它们的 `enabled` 改为 `true`。
+4. `mcp_config.json`：可选外部工具与搜索配置，由 `init_config.py` 初始化生成，默认全部关闭（`"enabled": false`）。如需接入网页搜索或外部 MCP 服务，修改该文件并将对应项设为 `true`。注意：配置文件中严禁写入明文密钥，敏感字段必须使用 `${ENV_VAR}` 环境变量占位符。
+5. 模板默认关闭需要模型的 `idiom_chain`、`chat_summary`、`mention_chat` 插件。填写模型配置后，把它们的 `enabled` 改为 `true`。
 
 账号 ID 必须是实际微信 ID；群 ID 以 `@chatroom` 结尾。`test` 消息会由 `id_responder` 插件回复当前会话 ID，`chats` 控制台命令可以列出本次连接收到消息的会话。所有示例 ID 和测试用名称均为虚构数据。
 
@@ -94,6 +95,36 @@ python tools/init_config.py
 - **群聊只读工具**：`get_group_context`、`get_member_recent_messages`、`list_group_members`、`get_group_status`。
 - **记忆写工具**：`memory_save`、`memory_delete`（仅 VIP 与主号本人可用）。
 - **群聊定时提醒工具**：`reminder_create`、`reminder_list`、`reminder_cancel`（开启 `mention_chat` 时支持更口语化的时间表达，与规则路径共用存储与安全配额）。
+
+### 5. MCP 外部工具与网页搜索配置（mcp_config.json）
+
+框架内置对 Model Context Protocol (MCP) 与通用搜索引擎的原生支持，统一通过 `mcp_config.json` 管理。
+
+#### 内置网页搜索（web_search）
+支持 4 种搜索引擎 Provider：
+- `tavily`（默认）：`base_url: "https://api.tavily.com"`，国内/海外通用，配置 `api_key: "${TAVILY_API_KEY}"`。
+- `bocha`（博查）：`base_url: "https://api.bochaai.com/v1"`，面向中文场景优化，配置 `api_key: "${BOCHA_API_KEY}"`。
+- `brave`：`base_url: "https://api.search.brave.com/res/v1"`，独立索引，配置 `api_key: "${BRAVE_API_KEY}"`。
+- `searxng`：自建 SearXNG 元搜索引擎实例，`base_url: "https://your-searxng-instance/search"`，支持无密钥（须在 SearXNG 服务端开启 JSON 输出格式）。
+
+#### 外部 MCP Server 接入
+支持两类 MCP 传输协议：
+- `streamable_http`：用于远程 MCP 服务。必须使用 `https://` 协议（本地开发仅允许 `127.0.0.1` / `localhost` 回环使用 `http://`）。请求头通过 `headers` 传递凭据，如 `"Authorization": "Bearer ${REMOTE_MCP_TOKEN}"`。
+- `stdio`：用于本地命令行运行的 MCP 服务（如 `command: "npx"`, `args: ["-y", "@modelcontextprotocol/server-everything"]`）。环境变量通过 `env` 传递，如 `"API_KEY": "${LOCAL_MCP_API_KEY}"`。框架对 stdio 子进程树（包含 Windows Job Object 与 POSIX 进程组）实行全生命周期管理，停止时彻底回收。
+
+> **安全与环境变量规范**：所有敏感密钥（`api_key`、`headers`、`env`）严禁明文字面量写入配置文件，必须使用 `${ENV_VAR}` 环境变量占位符。发布门禁 `python tools/check_publication.py` 会强制校验并拦截任何包含明文密钥的文件。
+
+#### 安全分级与权限裁剪（全群开放下尤为关键）
+在群聊开放（尤其是 `allow_all_groups: true` 全群开放）时，外部工具通过以下三维矩阵严格限制调用权限，防止 prompt 注入攻击与数据越权：
+- **`access` 访问级别**：
+  - `public`：所有群成员均可调用（仅允许只读工具，强制禁止开启 `allow_write`）；
+  - `vip`：仅 VIP 成员可调用（在群聊艾特中仅 VIP 说话人暴露，或在私聊中可用）；
+  - `self`：仅机器人主号本人可用（在文件传输助手或主号发言时暴露）。
+- **`allow_in_group` 群聊暴露控制**：
+  - `false`：该工具在群聊中彻底隐藏，仅在私聊或文件传输助手中可用，避免敏感工具在群聊被诱导触发；
+  - `true`：允许在群聊中按 `access` 级别向符合条件的用户暴露。
+- **`allow_write` 副作用控制**：
+  - 标记工具是否具备数据写入/修改/删除等外部副作用。`access: "public"` 时严格禁止；仅 `vip` 或 `self` 授权服务在明确需要时可开启。
 
 ## 启动与验证
 
