@@ -53,8 +53,10 @@ class Plugin:
             ctx.logger.warning("长期记忆存储初始化失败，记忆功能已停用：%s", type(error).__name__)
             self.memory_store = None
 
+        mcp_manager = getattr(ctx, "mcp", None)
         self.tool_registry = create_agent_tool_registry(
-            include_reminders=self.reminder_store is not None
+            include_reminders=self.reminder_store is not None,
+            mcp_manager=mcp_manager,
         )
         self._active_day = None
 
