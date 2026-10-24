@@ -1,4 +1,4 @@
-"""Agent 群内安全工具集（纯本地零外网依赖）。
+"""Agent 群内安全工具集与外部 MCP / WebSearch 工具桥接。
 
 - 4 个群类只读工具：get_group_context、get_member_recent_messages、list_group_members、get_group_status
   - 在非群会话（私聊、文件传输助手）中调用时，返回 {"ok": false, "error": "非群会话"}。
@@ -10,15 +10,17 @@
 - 3 个可选群聊提醒工具（include_reminders=True 时启用）：reminder_create、reminder_list、reminder_cancel
   - 来源会话 (account, room, sender_id) 强制由 ToolContext 绑定，不开放给模型参数。
   - reminder_create / reminder_cancel 为 write=True, privileged_only=False（允许普通群友操作本人数据，仍受 max_write_calls 限制）。
+- 可选外部工具动态桥接（传入 mcp_manager 时按需懒加载）：内置只读 web_search 与隔离后的 mcp__* 工具。
 """
 from __future__ import annotations
 
+import logging
 import re
 import time
 from datetime import datetime, timezone
 from typing import Any
 
-from .agent import ToolContext, ToolError, ToolRegistry, ToolSpec, is_filler
+from .agent import ToolContext, ToolError, ToolRegistry, ToolSpec, current_tool_timeout, is_filler
 from .members import BEIJING
 from .memory import GroupMemoryStore
 from .reminder_parser import (
@@ -40,6 +42,8 @@ from .reminders import (
     validate_content,
 )
 from .summary import CONTROL
+
+logger = logging.getLogger(__name__)
 
 WEEKDAY_NAMES = ("星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日")
 REMINDER_GROUP_ONLY_ERROR = "仅支持在群聊中管理提醒"
@@ -697,6 +701,113 @@ def create_agent_tool_specs(*, include_reminders: bool = False) -> tuple[ToolSpe
     return base
 
 
-def create_agent_tool_registry(*, include_reminders: bool = False) -> ToolRegistry:
-    """创建包含群内工具的 ToolRegistry（include_reminders=False 时保持标准 6 工具）。"""
-    return ToolRegistry(create_agent_tool_specs(include_reminders=include_reminders))
+WEB_SEARCH_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "query": {
+            "type": "string",
+            "description": "联网搜索关键词（1–200 字单行或简短查询词）",
+            "minLength": 1,
+            "maxLength": 200,
+        },
+        "limit": {
+            "type": "integer",
+            "description": "返回搜索结果条数上限，可选，范围 1–10",
+            "minimum": 1,
+            "maximum": 10,
+        },
+    },
+    "required": ["query"],
+    "additionalProperties": False,
+}
+
+
+def _make_web_search_handler(mcp_manager: Any, default_timeout: float):
+    def _handler(context: ToolContext, arguments: dict) -> dict:
+        del context
+        query = arguments.get("query")
+        if not isinstance(query, str) or not (1 <= len(query.strip()) <= 200):
+            raise ToolError("搜索关键词长度须为 1–200 个字符")
+        limit = arguments.get("limit")
+        if limit is not None and (type(limit) is not int or not (1 <= limit <= 10)):
+            raise ToolError("limit 应为 1–10 的整数")
+        eff_timeout = current_tool_timeout(default_timeout)
+        try:
+            return mcp_manager.search_web(query, limit=limit, timeout=eff_timeout)
+        except ValueError as err:
+            raise ToolError(sanitize_text(str(err)) or "搜索参数无效") from err
+
+    return _handler
+
+
+def _make_mcp_tool_handler(mcp_manager: Any, tool_name: str, default_timeout: float):
+    def _handler(context: ToolContext, arguments: dict) -> dict:
+        del context
+        eff_timeout = current_tool_timeout(default_timeout)
+        return mcp_manager.call_tool(tool_name, arguments, timeout=eff_timeout)
+
+    return _handler
+
+
+def build_external_tool_specs(mcp_manager: Any) -> tuple[ToolSpec, ...]:
+    """按需从 MCPManager 构建内置 web_search 与各懒加载 MCP Server 的 ToolSpec 元组。"""
+    if mcp_manager is None:
+        return ()
+
+    specs: list[ToolSpec] = []
+    if getattr(mcp_manager, "web_search_enabled", False):
+        ws_cfg = mcp_manager.web_search_config
+        specs.append(
+            ToolSpec(
+                name="web_search",
+                description="通过配置的搜索引擎检索公开网页关键词摘要（只读，结果仅供参考）。",
+                parameters_schema=WEB_SEARCH_SCHEMA,
+                handler=_make_web_search_handler(mcp_manager, ws_cfg.timeout_seconds),
+                write=False,
+                privileged_only=False,
+                access="public",
+                allow_in_group=True,
+                timeout=ws_cfg.timeout_seconds,
+                result_limit=ws_cfg.max_result_chars,
+                external=True,
+            )
+        )
+
+    for desc in mcp_manager.list_tool_descriptors():
+        try:
+            specs.append(
+                ToolSpec(
+                    name=desc.name,
+                    description=desc.description,
+                    parameters_schema=desc.parameters_schema,
+                    handler=_make_mcp_tool_handler(mcp_manager, desc.name, desc.timeout_seconds),
+                    write=desc.write,
+                    privileged_only=desc.privileged_only,
+                    access=desc.access,
+                    allow_in_group=desc.allow_in_group,
+                    timeout=desc.timeout_seconds,
+                    result_limit=desc.max_result_chars,
+                    external=True,
+                )
+            )
+        except ValueError as err:
+            logger.warning(
+                "跳过无效的外部 MCP 工具规格 %s：%s",
+                sanitize_text(str(getattr(desc, "name", ""))),
+                sanitize_text(str(err)),
+            )
+
+    return tuple(specs)
+
+
+def create_agent_tool_registry(
+    *,
+    include_reminders: bool = False,
+    mcp_manager: Any = None,
+) -> ToolRegistry:
+    """创建包含群内工具的 ToolRegistry；传入 mcp_manager 时挂载按需懒加载的外部工具源。"""
+    provider = (lambda: build_external_tool_specs(mcp_manager)) if mcp_manager is not None else None
+    return ToolRegistry(
+        create_agent_tool_specs(include_reminders=include_reminders),
+        dynamic_provider=provider,
+    )
