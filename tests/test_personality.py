@@ -11,6 +11,7 @@ from plugins.mention_chat import Plugin as ChatPlugin
 from plugins.personality import Plugin as PersonalityPlugin
 from plugins.idiom_chain import Plugin as IdiomPlugin
 from wxbot_framework.dialogue import Dialogue
+from wxbot_framework.llm import ChatResult
 from wxbot_framework.members import MemberError, SnapshotExpired
 from wxbot_framework.mentions import parse_at_members, strip_at_labels
 from wxbot_framework.personality import PROMPTS, PersonalityExpired, PersonalityState, prepare_switch, game_reply
@@ -24,6 +25,8 @@ ROOM, CAT, ROBOT, OTHER_ROOM, OTHER = daily.ROOM, daily.CAT, daily.ROBOT, daily.
 class PersonalityTests(unittest.TestCase):
     setUp = daily.DailySummaryTests.setUp
     tearDown = daily.DailySummaryTests.tearDown
+    # new_store 与临时目录清理都在 test_chat_summary 里用 addCleanup 统一登记：
+    # 成员目录的 sqlite 句柄先关闭，临时目录后删除，Windows 上不会残留占用。
     new_store = daily.DailySummaryTests.new_store
     message = daily.DailySummaryTests.message
     model = daily.DailySummaryTests.model
@@ -37,7 +40,15 @@ class PersonalityTests(unittest.TestCase):
 
     def setup_chat(self, provider=None):
         self.backend.send_at_text = lambda room, text, ids: self.backend.sent.append((room, text, ids)) or True
-        self.ctx._llm = Mock(complete_json=provider or Mock(return_value={"reply": "这是回答。", "summary": "这是总结。"}))
+        if provider is None:
+            fake_chat = Mock(return_value=ChatResult("这是回答。"))
+        elif isinstance(provider, Mock) and not getattr(provider, "side_effect", None) and provider.return_value and isinstance(provider.return_value, dict):
+            fake_chat = Mock(return_value=ChatResult(provider.return_value.get("reply", "")))
+        elif callable(provider):
+            fake_chat = provider
+        else:
+            fake_chat = Mock(return_value=provider)
+        self.ctx._llm = Mock(complete_chat=fake_chat)
         plugin = ChatPlugin()
         plugin.on_load(self.ctx)
         return plugin
@@ -188,24 +199,35 @@ class PersonalityTests(unittest.TestCase):
         self.store.set_personality(ROOM, "嘴臭")
         for index in range(3):
             self.store.record(self.message(f"我今天第{index}次摸鱼", sequence=index + 1))
-        provider = Mock(return_value={"reply": "你这效率，进度条看了都想请假。"})
-        plugin = self.setup_chat(provider)
+        chat_mock = Mock(return_value=ChatResult("你这效率，进度条看了都想请假。"))
+        plugin = self.setup_chat(chat_mock)
         msg = self.chat("我今天又摸鱼了")
         plugin.on_message(msg, self.ctx)
-        system, user = provider.call_args.args
-        self.assertTrue(system.startswith("当前人格：嘴臭"))
-        payload = json.loads(user)
-        self.assertEqual(len(payload["previous"]), 3)
-        self.assertEqual(payload["current"], "我今天又摸鱼了")
-        self.assertNotIn(CAT, user)
+        messages = chat_mock.call_args[0][0]
+        system = messages[0]["content"]
+        self.assertIn("当前人格", system)
+        self.assertIn("超雄", system)
+        self.assertIn("我今天第0次摸鱼", system)
+        self.assertIn("我今天第1次摸鱼", system)
+        self.assertIn("我今天第2次摸鱼", system)
+        self.assertEqual(messages[-1]["content"], "我今天又摸鱼了")
+        self.assertNotIn(CAT, json.dumps(messages, ensure_ascii=False))
         self.assertEqual(self.backend.sent[-1][2], (CAT,))
         self.assertTrue(self.backend.sent[-1][1].startswith("@测试成员\u2005"))
 
     def test_short_mouth_dialogue_is_plain_and_keeps_real_at_and_context(self):
         self.store.set_personality(ROOM, "嘴臭")
         self.store.record(self.message("今天写了三行代码", sequence=1))
-        provider = Mock(return_value={"reply": "```text\n**三行代码就敢吹，先把手上的任务搞定再说。**\n```"})
-        plugin = self.setup_chat(provider)
+        call_count = 0
+        def fake_chat(messages, *, tools=None, tool_choice="auto"):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return ChatResult("```text\n**三行代码就敢吹，先把手上的任务搞定再说。**\n```")
+            return ChatResult("#**```")
+
+        chat_mock = Mock(side_effect=fake_chat)
+        plugin = self.setup_chat(chat_mock)
         plugin.on_message(self.chat("我已经很强了"), self.ctx)
         sent = self.backend.sent[-1]
         body = strip_at_labels(sent[1])
@@ -213,9 +235,9 @@ class PersonalityTests(unittest.TestCase):
         self.assertLessEqual(len(body), 20)
         self.assertTrue(body.startswith("三行代码"))
         self.assertFalse(any(char in body for char in "`#*-|"))
-        self.assertEqual(len(json.loads(provider.call_args.args[1])["previous"]), 1)
-        self.assertIn("长度与排版优先", provider.call_args.args[0])
-        provider.return_value = {"reply": "#**```"}
+        first_call_messages = chat_mock.call_args_list[0][0][0]
+        self.assertIn("今天写了三行代码", first_call_messages[0]["content"])
+        self.assertIn("当前人格", first_call_messages[0]["content"])
         plugin.on_message(self.chat(sequence=101), self.ctx)
         self.assertIn("暂时无法回复", self.backend.sent[-1][1])
 
@@ -244,12 +266,12 @@ class PersonalityTests(unittest.TestCase):
             self.assertFalse(any(char in text for char in "`#*-|"))
 
     def test_mention_of_other_person_and_bot_output_do_not_call_model(self):
-        provider = Mock(return_value={"reply": "回答"})
-        plugin = self.setup_chat(provider)
+        chat_mock = Mock(return_value=ChatResult("回答"))
+        plugin = self.setup_chat(chat_mock)
         for msg in (self.chat(at_members=(OTHER,)), self.chat(sequence=101, bot_generated=True),
                     self.message("@机器人 只是可见文字"), Message("私聊", CAT)):
             plugin.on_message(msg, self.ctx)
-        provider.assert_not_called()
+        chat_mock.assert_not_called()
         self.assertEqual(self.backend.sent, [])
 
     def test_unbound_person_can_chat_and_bot_does_not_reply_to_id_text(self):
@@ -272,9 +294,9 @@ class PersonalityTests(unittest.TestCase):
     def test_clear_and_personality_change_during_chat_request_cancel_reply(self):
         for mutation in (lambda: self.store.clear(ROOM), lambda: self.store.set_personality(ROOM, "卑微")):
             self.store.set_personality(ROOM, "嘴臭")
-            def change(system, user):
+            def change(messages, *, tools=None, tool_choice="auto"):
                 mutation()
-                return {"reply": "失效的结果"}
+                return ChatResult("失效的结果")
             plugin = self.setup_chat(change)
             plugin.on_message(self.chat(), self.ctx)
         self.assertEqual(self.backend.sent, [])
@@ -297,7 +319,7 @@ class PersonalityTests(unittest.TestCase):
 
     def test_long_reply_respects_byte_limit_including_mention_nickname(self):
         self.store.register("🌸" * 64, ROOM, CAT)
-        plugin = self.setup_chat(Mock(return_value={"reply": "中文🌸" * 190}))
+        plugin = self.setup_chat(Mock(return_value=ChatResult("中文🌸" * 190)))
         plugin.on_message(self.chat(), self.ctx)
         self.assertGreater(len(self.backend.sent), 1)
         self.assertTrue(all(len(row[1].encode("utf-8")) <= 1023 for row in self.backend.sent))
@@ -305,7 +327,7 @@ class PersonalityTests(unittest.TestCase):
 
     def test_invalid_model_reply_is_reported_without_deleting_context(self):
         self.store.record(self.message("历史", sequence=1))
-        plugin = self.setup_chat(Mock(return_value={"reply": ""}))
+        plugin = self.setup_chat(Mock(return_value=ChatResult("")))
         plugin.on_message(self.chat(), self.ctx)
         self.assertIn("暂时无法回复", self.backend.sent[-1][1])
         self.assertEqual(len(self.store.conversation_snapshot(self.chat(sequence=101)).messages), 2)
@@ -334,6 +356,7 @@ class NativeAtReceiveTests(unittest.TestCase):
         self.assertEqual(strip_at_labels("@机器 人\u2005@小明\u2005请看看这句话"), "请看看这句话")
         self.assertEqual(strip_at_labels("普通 @example.com 文本"), "普通 @example.com 文本")
 
+    @unittest.skipUnless(sys.platform == "win32", "本机 Windows ABI 检查")
     def test_native_metadata_marks_only_actual_robot_group_at(self):
         native = daily.ROOT / "native"
         if str(native) not in sys.path:
