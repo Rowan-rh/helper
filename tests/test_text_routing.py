@@ -2,11 +2,18 @@
 from __future__ import annotations
 
 import ctypes
+from datetime import datetime
+import json
+import logging
 from pathlib import Path
 import sys
+import tempfile
 import time
 import unittest
 
+from plugins.reminder import Plugin as ReminderPlugin
+from wxbot_framework.members import BEIJING, MemberStore
+from wxbot_framework.reminders import ReminderStore, prepare_reminder
 from wxbot_framework.sdk import Message
 from wxbot_framework.text import TextRouter, validate_target
 
@@ -65,6 +72,112 @@ class TextRoutingTests(unittest.TestCase):
             data = self.router.convert(GROUP, SELF, SELF + ":\n" + text)
             self.assertTrue(data["is_self"])
             self.assertEqual(data["msg"], text)
+
+    def test_primary_phone_reminder_commands_route_and_execute_lifecycle(self):
+        self.identify()
+
+        # 1. 普通主号群聊非命令文本仍被过滤（ignored_self 增加）
+        before_ignored = self.router.ignored_self
+        self.assertIsNone(self.router.convert(GROUP, SELF, SELF + ":\n普通主号群聊非命令文本"))
+        self.assertEqual(self.router.ignored_self, before_ignored + 1)
+
+        # 2. 验证 5 个命令均能通过 TextRouter.convert，且 is_self=True、dispatch_to_plugins=True
+        test_commands = [
+            "/提醒 15:00 喝水",
+            "/我的提醒",
+            "/提醒列表",
+            "/取消提醒 1",
+            "/取消全部提醒",
+        ]
+        for cmd in test_commands:
+            data = self.router.convert(GROUP, SELF, SELF + ":\n" + cmd)
+            self.assertIsNotNone(data, f"命令 {cmd} 应被路由解析")
+            self.assertTrue(data["is_self"])
+            self.assertTrue(data["dispatch_to_plugins"])
+            self.assertEqual(data["msg"], cmd)
+            self.assertEqual(data["chat_id"], GROUP)
+            self.assertEqual(data["sender_id"], SELF)
+
+        # 3. 经 prepare_reminder + ReminderPlugin 完成创建、查看与取消闭环
+        scratch = ROOT / ".runtime/tests"
+        scratch.mkdir(parents=True, exist_ok=True)
+        temporary = tempfile.TemporaryDirectory(dir=scratch)
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name).resolve()
+
+        members_path = root / "members.json"
+        members_path.write_text(json.dumps({
+            "database_file": ".runtime/member_data.sqlite3",
+            "groups": {GROUP: []},
+        }), encoding="utf-8")
+        members = MemberStore(members_path, SELF)
+        self.addCleanup(members.close)
+
+        store = ReminderStore(root / ".runtime/reminders.sqlite3", SELF, root)
+        self.addCleanup(store.close)
+
+        # 固定测试基准时间：北京时间 2026-10-24 14:00:00，此时 15:00 喝水 为 1 小时后，合法有效
+        base_now = datetime(2026, 10, 24, 14, 0, 0, tzinfo=BEIJING)
+
+        class MockContext:
+            def __init__(self, m, r):
+                self.members = m
+                self.reminders = r
+                self.logger = logging.getLogger("MockContext")
+                self.replies = []
+
+            def reply(self, message, text, **kwargs):
+                self.replies.append((message.chat_id, message.sender_id, text))
+                return True
+
+        ctx = MockContext(members, store)
+        plugin = ReminderPlugin(clock=lambda: base_now.timestamp())
+        plugin.on_load(ctx)
+        self.addCleanup(plugin.on_unload, ctx)
+
+        def dispatch_cmd(command_text: str):
+            data = self.router.convert(GROUP, SELF, SELF + ":\n" + command_text)
+            msg = Message.from_native(11046, data, "session")
+            prepared = prepare_reminder(msg, members, now=base_now)
+            self.assertTrue(prepared.data.get("reminder_intent"), f"命令 {command_text} 必须打上提醒意图")
+            plugin.on_message(prepared, ctx)
+
+        # 3.1 创建提醒
+        dispatch_cmd("/提醒 15:00 喝水")
+        self.assertEqual(len(ctx.replies), 1)
+        _, _, reply_create = ctx.replies[-1]
+        self.assertIn("已设置提醒 [#1]", reply_create)
+        self.assertIn("2026-10-24 15:00", reply_create)
+        self.assertIn("喝水", reply_create)
+
+        # 3.2 查看提醒（/我的提醒）
+        dispatch_cmd("/我的提醒")
+        self.assertEqual(len(ctx.replies), 2)
+        _, _, reply_list1 = ctx.replies[-1]
+        self.assertIn("你在本群的待触发提醒（1/5）：", reply_list1)
+        self.assertIn("#1 2026-10-24 15:00 喝水", reply_list1)
+
+        # 3.3 查看提醒（/提醒列表）
+        dispatch_cmd("/提醒列表")
+        self.assertEqual(len(ctx.replies), 3)
+        _, _, reply_list2 = ctx.replies[-1]
+        self.assertIn("你在本群的待触发提醒（1/5）：", reply_list2)
+        self.assertIn("#1 2026-10-24 15:00 喝水", reply_list2)
+
+        # 3.4 取消单条提醒（/取消提醒 1）
+        dispatch_cmd("/取消提醒 1")
+        self.assertEqual(len(ctx.replies), 4)
+        _, _, reply_cancel1 = ctx.replies[-1]
+        self.assertEqual(reply_cancel1, "已取消提醒 [#1]（2026-10-24 15:00 喝水）。")
+        self.assertEqual(len(store.list_pending(GROUP, SELF)), 0)
+
+        # 3.5 再次创建后通过 /取消全部提醒 闭环
+        dispatch_cmd("/提醒 15:00 喝水")
+        self.assertEqual(len(store.list_pending(GROUP, SELF)), 1)
+        dispatch_cmd("/取消全部提醒")
+        _, _, reply_cancel_all = ctx.replies[-1]
+        self.assertEqual(reply_cancel_all, "已取消你在本群的全部待触发提醒（共 1 条）。")
+        self.assertEqual(len(store.list_pending(GROUP, SELF)), 0)
 
     @unittest.skipUnless(sys.platform == "win32", "本机 Windows ABI 检查")
     def test_native_service_skips_recent_bot_text_but_allows_players(self):

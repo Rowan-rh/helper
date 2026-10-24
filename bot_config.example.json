@@ -19,6 +19,9 @@
     "personality": {
       "enabled": true
     },
+    "reminder": {
+      "enabled": true
+    },
     "mention_chat": {
       "enabled": false
     },
