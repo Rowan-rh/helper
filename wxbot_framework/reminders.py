@@ -12,13 +12,15 @@ import math
 import sqlite3
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
+from types import MappingProxyType
 
 from .account import validate_account
 from .members import BEIJING
 from .memory import validate_runtime_db_path
+from .mentions import strip_at_labels
 from .sdk import SendNotAttempted, mention_display_name
 from .text import validate_mentions
 
@@ -430,3 +432,26 @@ class ReminderTicker(threading.Thread):
                 self.scheduler.tick()
             except Exception:
                 logger.exception("提醒调度失败；下一轮继续")
+
+
+REMINDER_COMMANDS = frozenset({"/提醒", "/我的提醒", "/提醒列表", "/取消提醒", "/取消全部提醒"})
+
+
+def prepare_reminder(message, members):
+    """分发前只标记提醒意图，供 mention_chat 让路；不解析时间、不写库。"""
+    if members is None or message.type != 1 or not message.is_group or message.chat_id not in members.groups:
+        return message
+    if not message.data.get("dispatch_to_plugins", True) or message.data.get("bot_generated"):
+        return message
+    text = message.text.strip()
+    words = text.split(maxsplit=1)
+    if words and words[0] in REMINDER_COMMANDS:
+        intent = True
+    else:
+        intent = bool(message.data.get("is_at_self") and members.account in message.data.get("at_members", ()) and
+                      "WXBOT_AT_CHAT_PROBE" not in text and "提醒" in strip_at_labels(text))
+    if not intent:
+        return message
+    data = dict(message.data)
+    data["reminder_intent"] = True
+    return replace(message, data=MappingProxyType(data))
