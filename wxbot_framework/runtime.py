@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
 import queue
 import shlex
 import sys
@@ -10,6 +11,7 @@ import threading
 import time
 
 from .backend import CAPABILITIES, TEXT_CAPABILITIES, NativeFileHelperBackend, NativeTextBackend
+from .mcp_client import MCPConfig, MCPConfigError, MCPManager
 from .plugins import PluginManager
 from .sdk import ServiceFacade
 from .members import MemberStore
@@ -28,11 +30,20 @@ class BotApplication:
         # 提醒依赖成员目录的固定账号与 groups；数据库在首次使用时才创建。
         self.reminders = (ReminderStore.default(self.members.account, self.store.path.parent)
                           if self.members is not None else None)
+        mcp_file = self.config.get("mcp_config_file", "mcp_config.json")
+        if mcp_file is None or mcp_file == "":
+            mcp_cfg = MCPConfig(enabled=False)
+        elif isinstance(mcp_file, str):
+            mcp_config_path = self.store.path.parent / mcp_file
+            mcp_cfg = MCPConfig.from_file(mcp_config_path)
+        else:
+            raise MCPConfigError("mcp_config_file 必须是字符串或 null")
+        self.mcp = MCPManager(mcp_cfg, log_dir=Path(root) / "logs")
         generic = self.config.get("backend") == "native_text"
         capabilities = TEXT_CAPABILITIES if generic else CAPABILITIES
         self.plugins = PluginManager(root / "plugins", store, self.service, capabilities,
                                      self.config.get("plugin_queue_size", 128), member_store=self.members,
-                                     reminder_store=self.reminders)
+                                     reminder_store=self.reminders, mcp_manager=self.mcp)
         self.scheduler = (ReminderScheduler(self.reminders, self.members, self._send_reminder,
                                             is_active=lambda: self.plugins.is_active("reminder"),
                                             ready=self._reminder_ready,
@@ -219,6 +230,11 @@ class BotApplication:
         if self.scheduler is not None:
             self.scheduler.stop()
         self.plugins.shutdown()
+        if self.mcp is not None:
+            try:
+                self.mcp.close()
+            except Exception:
+                logger.exception("MCP 管理器关闭失败，继续清理原生连接")
         cleaned = self._disconnect()
         if self.reminders is not None:
             self.reminders.close()
