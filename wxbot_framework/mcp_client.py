@@ -1163,6 +1163,10 @@ _PROCESS_SET_QUOTA = 0x0100
 _PROCESS_TERMINATE = 0x0001
 
 
+def _is_windows() -> bool:
+    return os.name == "nt"
+
+
 class _Win32JobHandle:
     """Windows Job Object 包装器：绑定 KILL_ON_JOB_CLOSE 并在关闭时终止整棵子进程树。"""
 
@@ -1172,7 +1176,7 @@ class _Win32JobHandle:
 
     @classmethod
     def create_and_assign(cls, proc: subprocess.Popen[Any]) -> _Win32JobHandle | None:
-        if os.name != "nt" or not hasattr(ctypes, "windll"):
+        if not _is_windows() or not hasattr(ctypes, "windll"):
             return None
         try:
             k32 = ctypes.windll.kernel32
@@ -1291,7 +1295,7 @@ def _run_windows_taskkill(pid: int, timeout: float) -> None:
             stderr=subprocess.DEVNULL,
             timeout=max(0.2, timeout),
             check=False,
-            creationflags=flags if os.name == "nt" else 0,
+            creationflags=flags if _is_windows() else 0,
         )
     except Exception:  # noqa: BLE001
         pass
@@ -1322,8 +1326,9 @@ class StdioMCPTransport:
             self.stderr_log_path.touch()
 
         child_env = build_safe_stdio_env(env, base_env=base_env)
+        is_win = _is_windows()
         executable_cmd = command.strip()
-        if os.name == "nt":
+        if is_win:
             resolved = shutil.which(executable_cmd, path=child_env.get("PATH") or child_env.get("Path"))
             if resolved:
                 executable_cmd = resolved
@@ -1337,7 +1342,7 @@ class StdioMCPTransport:
             "cwd": cwd,
             "bufsize": 0,
         }
-        if os.name == "nt":
+        if is_win:
             no_win = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
             new_grp = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
             popen_kwargs["creationflags"] = no_win | new_grp
@@ -1351,10 +1356,10 @@ class StdioMCPTransport:
 
         self._pgid: int | None = (
             int(self._proc.pid)
-            if os.name != "nt" and isinstance(getattr(self._proc, "pid", None), int) and self._proc.pid > 0
+            if not is_win and isinstance(getattr(self._proc, "pid", None), int) and self._proc.pid > 0
             else None
         )
-        self._job: _Win32JobHandle | None = _Win32JobHandle.create_and_assign(self._proc) if os.name == "nt" else None
+        self._job: _Win32JobHandle | None = _Win32JobHandle.create_and_assign(self._proc) if is_win else None
 
         self._closed = False
         self._eof = False
@@ -1585,7 +1590,7 @@ class StdioMCPTransport:
             graceful = False
 
         # 2. 无论父进程是否已退出，强制清理可能残留的整棵孙进程树
-        if os.name == "nt":
+        if _is_windows():
             had_job = self._job is not None
             if self._job is not None:
                 self._job.terminate_and_close()
