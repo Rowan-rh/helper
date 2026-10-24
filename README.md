@@ -10,6 +10,7 @@
 ## 功能
 
 - 文件传输助手、好友和群聊文本收发，以及真正的群艾特。
+- 群聊定时提醒（`@机器人` 自然语言/规则提醒与 `/提醒`、`/我的提醒`、`/取消提醒`、`/取消全部提醒`，到点自动 `@` 设置人，停机 10 分钟宽限补发，无需配置大模型即可使用）。
 - 成语接龙：独立玩家、合并抢答和退出模式。
 - `/绑定 昵称`：只设置当前群的称呼；不同群各自保存。未绑定时使用联系人缓存中的微信名。
 - `/总结 昵称`、`/总结群聊`：通过配置的大模型总结当前群当天的文字记录。
@@ -34,13 +35,14 @@ python tools/init_config.py
 ```
 
 1. `bot_config.json`：将 `wechat_account` 改为自己的机器人微信 ID。绑定保存的是账号 ID，重新登录后 PID 改变不影响选择；多开时会等待指定账号，不改用其他账号。
-2. `members_config.json`：在 `groups` 中添加自己要启用的群 ID，成员列表可以为空：
+2. `members_config.json`：在 `groups` 中添加自己要启用的群 ID，成员列表可以为空。若希望对所有群聊开放，可配置 `"allow_all_groups": true`（配合 `bot_config.json` 中的 `"chat_allowlist": []` 可对所有群聊开放 `@机器人`，`agent_vip_wxids` 仍仅控制私聊与群记忆写入）：
 
 ```json
 {
   "database_file": ".runtime/member_data.sqlite3",
   "history_enabled": true,
   "daily_clear": true,
+  "allow_all_groups": false,
   "groups": {
     "12345678@chatroom": []
   }
@@ -68,6 +70,7 @@ python tools/init_config.py
   "database_file": ".runtime/member_data.sqlite3",
   "history_enabled": true,
   "daily_clear": true,
+  "allow_all_groups": false,
   "agent_vip_wxids": [
     "wxid_example_vip"
   ],
@@ -86,6 +89,11 @@ python tools/init_config.py
 - `/ai 问题`：文件传输助手中唤醒 Agent 的专用前缀。
 - `/清空`：清理当前群当天的聊天记录，同时释放当前群的多轮会话内存，长期记忆保留。
 - `/help`：查看命令帮助清单。
+
+### 4. 工具说明
+- **群聊只读工具**：`get_group_context`、`get_member_recent_messages`、`list_group_members`、`get_group_status`。
+- **记忆写工具**：`memory_save`、`memory_delete`（仅 VIP 与主号本人可用）。
+- **群聊定时提醒工具**：`reminder_create`、`reminder_list`、`reminder_cancel`（开启 `mention_chat` 时支持更口语化的时间表达，与规则路径共用存储与安全配额）。
 
 ## 启动与验证
 
