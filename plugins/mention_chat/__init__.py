@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
+import time
 
 from wxbot_framework.agent import (
     Agent,
@@ -12,16 +13,20 @@ from wxbot_framework.agent import (
     ToolContext,
     AgentRequest,
 )
-from wxbot_framework.agent_tools import create_agent_tool_registry
+from wxbot_framework.agent_tools import create_agent_tool_registry, format_beijing_now
 from wxbot_framework.llm import LLMError
 from wxbot_framework.members import BEIJING, SnapshotExpired
 from wxbot_framework.memory import GroupMemoryStore, execute_memory_command
 from wxbot_framework.mentions import strip_at_labels
 from wxbot_framework.personality import PROMPTS, personality_text
+from wxbot_framework.sdk import CapabilityError
 from wxbot_framework.summary import split_text
 
 
 class Plugin:
+    def __init__(self, clock=time.time):
+        self.clock = clock
+
     def on_load(self, ctx):
         self.members = ctx.members
         if not self.members.history_enabled:
@@ -30,6 +35,11 @@ class Plugin:
 
         self.agent_config = AgentConfig.from_options(ctx.config.get("agent"))
         self.conversation_store = ConversationStore.from_config(self.agent_config)
+
+        try:
+            self.reminder_store = ctx.reminders
+        except CapabilityError:
+            self.reminder_store = None
 
         runtime_root = Path(__file__).resolve().parent.parent.parent
         try:
@@ -43,7 +53,11 @@ class Plugin:
             ctx.logger.warning("长期记忆存储初始化失败，记忆功能已停用：%s", type(error).__name__)
             self.memory_store = None
 
-        self.tool_registry = create_agent_tool_registry()
+        mcp_manager = getattr(ctx, "mcp", None)
+        self.tool_registry = create_agent_tool_registry(
+            include_reminders=self.reminder_store is not None,
+            mcp_manager=mcp_manager,
+        )
         self._active_day = None
 
     def on_unload(self, ctx):
@@ -144,6 +158,8 @@ class Plugin:
         if message.is_group:
             if message.chat_id not in self.members.groups:
                 return
+            if message.data.get("reminder_intent"):
+                return
             account = self.members.account
             raw_text = message.text.strip()
 
@@ -210,6 +226,20 @@ class Plugin:
 
             user_text = strip_at_labels(snapshot.current).strip()
             background = tuple(strip_at_labels(row["text"]) for row in snapshot.messages)
+            at_members = message.data.get("at_members", ())
+            has_other_mentions = any(m != self.members.account for m in at_members)
+            extras = {
+                "memory_store": self.memory_store,
+                "filler_words": self.agent_config.filler_words,
+            }
+            now_text = None
+            if self.reminder_store is not None:
+                extras["reminder_store"] = self.reminder_store
+                extras["has_other_mentions"] = has_other_mentions
+                extras["now_fn"] = self.clock
+                extras["reminder_active"] = lambda: ctx.is_plugin_active("reminder")
+                now_text = format_beijing_now(self.clock())
+
             context = ToolContext(
                 account=self.members.account,
                 room=message.chat_id,
@@ -218,10 +248,7 @@ class Plugin:
                 is_self=message.sender_id == self.members.account,
                 is_group=True,
                 store=self.members,
-                extras={
-                    "memory_store": self.memory_store,
-                    "filler_words": self.agent_config.filler_words,
-                }
+                extras=extras,
             )
             request = AgentRequest(
                 key=key,
@@ -232,10 +259,16 @@ class Plugin:
                 memory_snapshot=(lambda: self.memory_store.snapshot_text(self.members.account, message.chat_id)) if self.memory_store else None,
                 background=background,
                 guard=guard,
+                now_text=now_text,
             )
             agent = Agent(ctx.llm, store=self.conversation_store, registry=self.tool_registry, config=self.agent_config)
             agent_reply = agent.run(request)
-            reply = personality_text(agent_reply.text, personality.name)
+            if any(name.startswith("reminder_") for name in agent_reply.tool_calls):
+                reply = agent_reply.text.strip()
+                if not reply:
+                    raise LLMError("大模型未给出有效回复")
+            else:
+                reply = personality_text(agent_reply.text, personality.name)
 
             display = self.members.display_name(message.sender_id, message.chat_id) or snapshot.speaker_name
             budget = 1023 - len(("@" + display + "\u2005\n").encode("utf-8"))

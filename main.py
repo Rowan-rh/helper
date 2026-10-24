@@ -28,16 +28,16 @@ def configure_logging(config):
     logging.basicConfig(level=config.get("log_level", "INFO").upper(), handlers=[console, file], force=True)
 
 
-def main():
+def main(argv=None):
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
         sys.stderr.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=ROOT / "bot_config.json")
-    parser.add_argument("--check", action="store_true", help="检查配置、清单及启用插件语法，不注入微信")
+    parser.add_argument("--check", action="store_true", help="检查配置、MCP 静态规范、清单及启用插件语法，不注入微信")
     parser.add_argument("--list-plugins", action="store_true", help="列出可用插件，不注入微信")
     parser.add_argument("--run-seconds", type=float, default=0, help="有限时长检查；默认 0 持续运行")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     if not math.isfinite(args.run_seconds) or args.run_seconds < 0:
         parser.error("运行时长必须是非负有限数值")
     try:

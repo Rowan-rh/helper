@@ -6,7 +6,7 @@ ROOT = Path(__file__).resolve().parent.parent
 
 def initialize(root=ROOT):
     created = []
-    for stem in ('bot_config', 'members_config', 'llm_config'):
+    for stem in ('bot_config', 'members_config', 'llm_config', 'mcp_config'):
         destination = root / (stem + '.json')
         try:
             with destination.open('x', encoding='utf-8', newline='\n') as output:

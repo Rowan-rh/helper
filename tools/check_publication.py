@@ -48,26 +48,119 @@ def inspect(root, private_markers=()):
                for marker in private_markers):
             findings.append({'file':label,'kind':'known_private_marker'})
     findings.extend({'file':name,'kind':'runtime_or_legacy_directory'} for name in sorted(forbidden_dirs))
-    for name in ('bot_config','members_config','llm_config'):
+    for name in ('bot_config', 'members_config', 'llm_config', 'mcp_config'):
         template = root / (name + '.example.json')
         if not template.is_file():
             findings.append({'file':template.name,'kind':'missing_config_template'})
     for filename in ('bot_config.json','bot_config.example.json'):
         path = root / filename
         if path.exists():
-            data=json.loads(path.read_text(encoding='utf-8'))
+            try:
+                data = json.loads(path.read_text(encoding='utf-8-sig'))
+            except Exception:
+                findings.append({'file': filename, 'kind': 'invalid_config_json'})
+                continue
+            if not isinstance(data, dict):
+                findings.append({'file': filename, 'kind': 'invalid_config_json'})
+                continue
             if data.get('wechat_account') not in (None,'wxid_example_robot') or data.get('wechat_pid') is not None or data.get('chat_allowlist'):
                 findings.append({'file':filename,'kind':'nonempty_account_or_chat_binding'})
-            if data.get('plugins',{}).get('idiom_chain',{}).get('member_names'):
-                findings.append({'file':filename,'kind':'nonempty_member_names'})
+            plugins = data.get('plugins')
+            if isinstance(plugins, dict):
+                idiom_chain = plugins.get('idiom_chain')
+                if isinstance(idiom_chain, dict) and idiom_chain.get('member_names'):
+                    findings.append({'file':filename,'kind':'nonempty_member_names'})
     for filename in ('members_config.json','members_config.example.json'):
         path=root/filename
-        if path.exists() and json.loads(path.read_text(encoding='utf-8')).get('groups'):
-            findings.append({'file':filename,'kind':'nonempty_group_bindings'})
+        if path.exists():
+            try:
+                data = json.loads(path.read_text(encoding='utf-8-sig'))
+            except Exception:
+                findings.append({'file': filename, 'kind': 'invalid_config_json'})
+                continue
+            if not isinstance(data, dict):
+                findings.append({'file': filename, 'kind': 'invalid_config_json'})
+                continue
+            if data.get('groups'):
+                findings.append({'file':filename,'kind':'nonempty_group_bindings'})
     for filename in ('llm_config.json','llm_config.example.json'):
         path=root/filename
-        if path.exists() and json.loads(path.read_text(encoding='utf-8')).get('api_key'):
-            findings.append({'file':filename,'kind':'nonempty_api_key'})
+        if path.exists():
+            try:
+                data = json.loads(path.read_text(encoding='utf-8-sig'))
+            except Exception:
+                findings.append({'file': filename, 'kind': 'invalid_config_json'})
+                continue
+            if not isinstance(data, dict):
+                findings.append({'file': filename, 'kind': 'invalid_config_json'})
+                continue
+            if data.get('api_key'):
+                findings.append({'file':filename,'kind':'nonempty_api_key'})
+    valid_env_placeholder = re.compile(r'\$\{[A-Za-z_][A-Za-z0-9_]*\}')
+    valid_secret_placeholder = re.compile(r'(?:Bearer\s+)?\$\{[A-Za-z_][A-Za-z0-9_]*\}', re.IGNORECASE)
+    for filename in ('mcp_config.json', 'mcp_config.example.json'):
+        path = root / filename
+        if not path.exists():
+            continue
+        try:
+            data = json.loads(path.read_text(encoding='utf-8-sig'))
+        except Exception:
+            findings.append({'file': filename, 'kind': 'invalid_config_json'})
+            continue
+        if not isinstance(data, dict):
+            findings.append({'file': filename, 'kind': 'invalid_config_json'})
+            continue
+        if filename == 'mcp_config.example.json':
+            enabled = bool(data.get('enabled'))
+            ws = data.get('web_search')
+            if isinstance(ws, dict) and ws.get('enabled'):
+                enabled = True
+            servers = data.get('mcp_servers')
+            if isinstance(servers, dict):
+                for srv in servers.values():
+                    if isinstance(srv, dict) and srv.get('enabled'):
+                        enabled = True
+                        break
+            if enabled:
+                findings.append({'file': filename, 'kind': 'enabled_in_config_template'})
+        ws = data.get('web_search')
+        if isinstance(ws, dict):
+            api_key = ws.get('api_key')
+            if api_key is not None:
+                if isinstance(api_key, str):
+                    if api_key.strip() and not valid_env_placeholder.fullmatch(api_key.strip()):
+                        findings.append({'file': filename, 'kind': 'nonempty_api_key'})
+                else:
+                    findings.append({'file': filename, 'kind': 'nonempty_api_key'})
+        servers = data.get('mcp_servers')
+        if isinstance(servers, dict):
+            has_secret = False
+            for srv in servers.values():
+                if not isinstance(srv, dict):
+                    continue
+                for mapping_key in ('headers', 'env'):
+                    mapping = srv.get(mapping_key)
+                    if mapping is None:
+                        continue
+                    if isinstance(mapping, dict):
+                        for val in mapping.values():
+                            if val is None:
+                                continue
+                            if isinstance(val, str):
+                                stripped = val.strip()
+                                if stripped and not valid_secret_placeholder.fullmatch(stripped):
+                                    has_secret = True
+                                    break
+                            else:
+                                has_secret = True
+                                break
+                    else:
+                        has_secret = True
+                        break
+                if has_secret:
+                    break
+            if has_secret:
+                findings.append({'file': filename, 'kind': 'nonempty_mcp_secret'})
     return {'passed':not findings,'files_scanned':count,'bytes_scanned':total,'findings':findings}
 
 
