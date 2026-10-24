@@ -5,14 +5,24 @@ import re
 
 WXID = re.compile(r"^[A-Za-z0-9_.@-]{1,127}$")
 SYSTEM_PEERS = frozenset({"weixin", "fmessage", "newsapp", "floatbottle"})
-GROUP_CONTROL_COMMANDS = frozenset({"/help", "成语接龙", "合并接龙", "退出接龙"})
+GROUP_CONTROL_COMMANDS = frozenset({
+    "/help", "成语接龙", "合并接龙", "退出接龙",
+    "/记忆", "/清空记忆", "/重置对话",
+})
 FOUR_CHINESE = re.compile(r"^[\u3400-\u4dbf\u4e00-\u9fff]{4}$")
+COMMAND_PREFIXES = frozenset({
+    "/绑定", "/总结", "/总结群聊", "/切换人格", "/清空",
+    "/记忆", "/删除记忆", "/清空记忆", "/重置对话",
+})
 
 
 def own_group_command(text):
     value = text.strip()
-    return bool(value in GROUP_CONTROL_COMMANDS or FOUR_CHINESE.fullmatch(value) or
-                value.split(maxsplit=1)[:1] in (["/绑定"], ["/总结"], ["/总结群聊"], ["/切换人格"], ["/清空"]))
+    if not value:
+        return False
+    return bool(value in GROUP_CONTROL_COMMANDS or
+                FOUR_CHINESE.fullmatch(value) or
+                value.split(maxsplit=1)[0] in COMMAND_PREFIXES)
 
 
 def validate_target(target):

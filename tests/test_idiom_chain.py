@@ -5,7 +5,7 @@ import unittest
 from contextlib import nullcontext
 from unittest.mock import patch
 
-from plugins.idiom_chain import Plugin, HELP
+from plugins.idiom_chain import Plugin, HELP, Game
 from wxbot_framework.llm import LLMError
 from wxbot_framework.sdk import Message
 from wxbot_framework.personality import PersonalityState
@@ -56,7 +56,7 @@ class IdiomPluginTests(unittest.TestCase):
 
     def send(self, text, sender=A, room=ROOM, *, session="one", received_at=None, is_self=False, is_group=True):
         message = Message(text, room, sender_id=sender, session_id=session, is_group=is_group,
-                          is_self=is_self, received_at=time.monotonic() if received_at is None else received_at)
+                          is_self=is_self, received_at=time.perf_counter() if received_at is None else received_at)
         self.plugin.on_message(message, self.ctx)
         return message
 
@@ -67,7 +67,7 @@ class IdiomPluginTests(unittest.TestCase):
     def test_two_players_are_independent_and_use_member_names(self):
         self.start()
         # 两个答案都在机器人第一次回复之前到达：B 仍应从开场词接。
-        b_received = time.monotonic()
+        b_received = time.perf_counter()
         self.send("意气风发", A)
         self.send("意气风发", B, received_at=b_received)
         game = self.plugin.games[ROOM]
@@ -79,6 +79,40 @@ class IdiomPluginTests(unittest.TestCase):
         self.send("大大方方", A)
         self.assertEqual(game.players[A].current, "方兴未艾")
         self.assertEqual(game.players[B].current, "发扬光大")
+
+    def test_answer_at_ready_at_is_dropped_and_later_answer_is_accepted(self):
+        """回归：与出题同一刻度到达的答案被丢弃，稍晚到达的答案才被受理。"""
+        self.start()
+        self.send("意气风发")
+        ready_at = self.plugin.games[ROOM].players[A].ready_at
+        count = len(self.ctx.sent)
+        # 与出题同一刻度：不计入下一轮答案。
+        self.send("大大方方", A, received_at=ready_at)
+        self.assertEqual(len(self.ctx.sent), count)
+        self.assertEqual(self.plugin.games[ROOM].players[A].current, "发扬光大")
+        # 刻度之后：正常受理并推进到下一个成语。
+        self.ctx.llm.result["next_idiom"] = "方兴未艾"
+        self.send("大大方方", A, received_at=ready_at + 0.001)
+        self.assertEqual(len(self.ctx.sent), count + 1)
+        self.assertEqual(self.plugin.games[ROOM].players[A].current, "方兴未艾")
+
+    def test_message_and_chain_timestamps_share_the_perf_counter_clock(self):
+        """回归：消息与接龙时间戳必须统一用 perf_counter，不能混用低分辨率的 monotonic。"""
+        # dataclass 的 default_factory 在类定义时绑定了函数对象，只能直接核对来源。
+        self.assertIs(Message.__dataclass_fields__["received_at"].default_factory, time.perf_counter)
+        self.assertIs(Game.__dataclass_fields__["started_at"].default_factory, time.perf_counter)
+        monotonic_calls = []
+
+        def fake_monotonic():
+            monotonic_calls.append("monotonic")
+            return 0.0
+
+        # 运行期取时钟的地方是属性查找，替换 time 模块里的函数即可验证。
+        with patch("time.monotonic", fake_monotonic), patch("time.perf_counter", lambda: 100.0):
+            self.send("成语接龙")
+        self.assertEqual(monotonic_calls, [])
+        game = self.plugin.games[ROOM]
+        self.assertEqual(game.latest.ready_at, 100.0)
 
     def test_groups_do_not_share_game(self):
         self.start()
@@ -98,7 +132,7 @@ class IdiomPluginTests(unittest.TestCase):
         game = self.plugin.games[ROOM]
         self.assertEqual(game.shared.current, "发扬光大")
         self.assertEqual(game.players, {})
-        arrived = time.monotonic()
+        arrived = time.perf_counter()
         self.ctx.llm.result["next_idiom"] = "方兴未艾"
         self.send("大大方方", A, received_at=arrived)
         count = len(self.ctx.sent)
@@ -110,7 +144,7 @@ class IdiomPluginTests(unittest.TestCase):
     def test_failed_merged_answer_still_consumes_round(self):
         self.start()
         self.send("合并接龙")
-        arrived = time.monotonic()
+        arrived = time.perf_counter()
         self.send("异想天开", received_at=arrived)
         count = len(self.ctx.sent)
         self.send("意气风发", B, received_at=arrived)
@@ -133,7 +167,22 @@ class IdiomPluginTests(unittest.TestCase):
     def test_help_and_primary_phone_commands(self):
         self.send("/help", is_self=True)
         self.assertEqual(self.ctx.sent[-1][1], HELP)
-        self.assertEqual(HELP, "1. 成语接龙\n\n2. /绑定 昵称\n\n3. /总结 昵称\n\n4. /总结群聊\n\n5. /切换人格 嘴臭|卑微|夸夸|取消\n\n6. 艾特机器人对话\n\n7. /清空\n\n8. /help")
+        expected_help = (
+            "1. 成语接龙\n\n"
+            "2. /绑定 昵称\n\n"
+            "3. /总结 昵称\n\n"
+            "4. /总结群聊\n\n"
+            "5. /切换人格 嘴臭|卑微|夸夸|取消\n\n"
+            "6. 艾特机器人对话\n\n"
+            "7. /ai 问题（文件传输助手）\n\n"
+            "8. /重置对话\n\n"
+            "9. /记忆\n\n"
+            "10. /删除记忆 N\n\n"
+            "11. /清空记忆\n\n"
+            "12. /清空\n\n"
+            "13. /help"
+        )
+        self.assertEqual(HELP, expected_help)
         self.assertLessEqual(len(HELP.encode("utf-8")), 1023)
         self.send("成语接龙", is_self=True)
         self.assertEqual(self.ctx.sent[-1][1], "一心一意")
