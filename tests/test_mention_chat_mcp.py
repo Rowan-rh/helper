@@ -31,6 +31,7 @@ from wxbot_framework.mcp_client import (
 )
 from wxbot_framework.members import MemberStore
 from wxbot_framework.sdk import Message, PluginContext, ServiceFacade
+from wxbot_framework.web_search import WebSearchClient
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -347,6 +348,170 @@ class TestInitConfigAndCheckPublication(unittest.TestCase):
             res = check_publication.inspect(temp_path)
             mcp_findings = [f for f in res["findings"] if f["file"] == "mcp_config.json"]
             self.assertEqual(mcp_findings, [])
+
+    def test_readme_search_provider_endpoint_urls(self):
+        """验证 README.md 中 4 种搜索 provider 的 base_url 经 WebSearchClient 拼接后无路径重复。"""
+        readme_text = (ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn('`bocha`（博查）：`base_url: "https://api.bochaai.com"`', readme_text)
+        self.assertIn('`brave`：`base_url: "https://api.search.brave.com"`', readme_text)
+        self.assertIn('`tavily`（默认）：`base_url: "https://api.tavily.com"`', readme_text)
+        self.assertIn('`searxng`：自建 SearXNG 元搜索引擎实例，`base_url: "https://your-searxng-instance"`', readme_text)
+
+        cases = [
+            ("tavily", "https://api.tavily.com", "dummy_tavily", "https://api.tavily.com/search"),
+            ("bocha", "https://api.bochaai.com", "dummy_bocha", "https://api.bochaai.com/v1/web-search"),
+            ("brave", "https://api.search.brave.com", "dummy_brave", "https://api.search.brave.com/res/v1/web/search?q=test_query&count=5"),
+            ("searxng", "https://your-searxng-instance", "", "https://your-searxng-instance/search?q=test_query&format=json"),
+            ("searxng", "https://your-searxng-instance/search", "", "https://your-searxng-instance/search?q=test_query&format=json"),
+        ]
+        for provider, base_url, key, expected_url in cases:
+            cfg = WebSearchConfig(enabled=True, provider=provider, base_url=base_url, api_key=key)
+            client = WebSearchClient(cfg)
+            req = client._build_request("test_query", 5)
+            self.assertEqual(req.full_url, expected_url, f"Provider {provider} 端点拼接异常: {req.full_url}")
+            # 确保未发生双重前缀或后缀拼接
+            self.assertNotIn("/v1/v1/", req.full_url)
+            self.assertNotIn("/res/v1/res/v1/", req.full_url)
+            self.assertNotIn("/search/search", req.full_url)
+
+    def test_check_publication_utf8_bom_plaintext_key_intercepted(self):
+        """验证带 UTF-8 BOM 的明文 mcp_config.json 能被运行期加载且必须被发布门禁拦截。"""
+        secret_key = "tvly_super_secret_bom_token_999"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            for name in ("bot_config", "members_config", "llm_config", "mcp_config"):
+                (temp_path / f"{name}.example.json").write_text(
+                    (ROOT / f"{name}.example.json").read_text(encoding="utf-8"), encoding="utf-8"
+                )
+
+            bom_cfg_path = temp_path / "mcp_config.json"
+            cfg_dict = {
+                "enabled": False,
+                "web_search": {
+                    "enabled": False,
+                    "provider": "tavily",
+                    "base_url": "https://api.tavily.com",
+                    "api_key": secret_key,
+                },
+                "mcp_servers": {},
+            }
+            # 写入带 UTF-8 BOM 且含明文 api_key 的配置
+            bom_bytes = b"\xef\xbb\xbf" + json.dumps(cfg_dict, ensure_ascii=False).encode("utf-8")
+            bom_cfg_path.write_bytes(bom_bytes)
+
+            # 运行期 MCPConfig.from_file 使用 utf-8-sig 能成功解析
+            runtime_loaded = MCPConfig.from_file(bom_cfg_path)
+            self.assertEqual(runtime_loaded.web_search.api_key, secret_key)
+
+            # 发布门禁必须拦截，报告 nonempty_api_key
+            res = check_publication.inspect(temp_path)
+            self.assertFalse(res["passed"])
+            mcp_findings = [f for f in res["findings"] if f["file"] == "mcp_config.json"]
+            kinds = {f["kind"] for f in mcp_findings}
+            self.assertIn("nonempty_api_key", kinds)
+
+            # 严禁回显密钥原文
+            report_str = json.dumps(res, ensure_ascii=False)
+            self.assertNotIn(secret_key, report_str)
+
+    def test_check_publication_corrupted_json_intercepted_and_no_leak(self):
+        """验证损坏 JSON 或非 dict 根节点的配置文件被拦截为 invalid_config_json，且绝不回显原文。"""
+        secret_corrupt = "super_corrupt_secret_never_leak_xyz"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            for name in ("bot_config", "members_config", "llm_config", "mcp_config"):
+                (temp_path / f"{name}.example.json").write_text(
+                    (ROOT / f"{name}.example.json").read_text(encoding="utf-8"), encoding="utf-8"
+                )
+
+            # 1. 语法损坏的 JSON（含密钥原文）
+            cfg_path = temp_path / "mcp_config.json"
+            cfg_path.write_text(f'{{"web_search": {{"api_key": "{secret_corrupt}"\n', encoding="utf-8")
+
+            res = check_publication.inspect(temp_path)
+            self.assertFalse(res["passed"])
+            mcp_findings = [f for f in res["findings"] if f["file"] == "mcp_config.json"]
+            kinds = {f["kind"] for f in mcp_findings}
+            self.assertIn("invalid_config_json", kinds)
+
+            report_str = json.dumps(res, ensure_ascii=False)
+            self.assertNotIn(secret_corrupt, report_str)
+            self.assertNotIn("JSONDecodeError", report_str)
+
+            # 2. 根节点非 dict（如 list 根节点含密钥）
+            cfg_path.write_text(f'["{secret_corrupt}", 123]', encoding="utf-8")
+            res2 = check_publication.inspect(temp_path)
+            self.assertFalse(res2["passed"])
+            mcp_findings2 = [f for f in res2["findings"] if f["file"] == "mcp_config.json"]
+            kinds2 = {f["kind"] for f in mcp_findings2}
+            self.assertIn("invalid_config_json", kinds2)
+
+            report_str2 = json.dumps(res2, ensure_ascii=False)
+            self.assertNotIn(secret_corrupt, report_str2)
+
+    def test_check_publication_intercepts_concatenated_or_nonstring_secrets(self):
+        """验证全串匹配拦截包含明文前缀/后缀的拼接占位符与非字符串非空值。"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            for name in ("bot_config", "members_config", "llm_config", "mcp_config"):
+                (temp_path / f"{name}.example.json").write_text(
+                    (ROOT / f"{name}.example.json").read_text(encoding="utf-8"), encoding="utf-8"
+                )
+
+            # 1. 拼接明文密钥拦截（全串匹配拦截子串注入）
+            leak_cases = [
+                ("Bearer real_secret_token_${DUMMY}", "nonempty_mcp_secret"),
+                ("tvly-secret-${X}", "nonempty_mcp_secret"),
+                ("${X}_suffix_secret", "nonempty_mcp_secret"),
+            ]
+            for header_val, expected_kind in leak_cases:
+                cfg = temp_path / "mcp_config.json"
+                cfg.write_text(json.dumps({
+                    "enabled": False,
+                    "web_search": {"enabled": False, "api_key": ""},
+                    "mcp_servers": {
+                        "srv1": {
+                            "enabled": False,
+                            "headers": {"Authorization": header_val},
+                        }
+                    }
+                }), encoding="utf-8")
+                res = check_publication.inspect(temp_path)
+                self.assertFalse(res["passed"], f"值 {header_val} 应被拦截")
+                kinds = {f["kind"] for f in res["findings"] if f["file"] == "mcp_config.json"}
+                self.assertIn(expected_kind, kinds)
+
+            # 2. env 中的拼接密钥拦截
+            cfg = temp_path / "mcp_config.json"
+            cfg.write_text(json.dumps({
+                "enabled": False,
+                "web_search": {"enabled": False, "api_key": ""},
+                "mcp_servers": {
+                    "srv1": {
+                        "enabled": False,
+                        "env": {"API_KEY": "env_secret_token_${ENV_VAR}"},
+                    }
+                }
+            }), encoding="utf-8")
+            res = check_publication.inspect(temp_path)
+            kinds = {f["kind"] for f in res["findings"] if f["file"] == "mcp_config.json"}
+            self.assertIn("nonempty_mcp_secret", kinds)
+
+            # 3. 非字符串非空值拦截（数字、布尔等）
+            cfg.write_text(json.dumps({
+                "enabled": False,
+                "web_search": {"enabled": False, "api_key": 123456},
+                "mcp_servers": {
+                    "srv1": {
+                        "enabled": False,
+                        "headers": {"Authorization": True},
+                    }
+                }
+            }), encoding="utf-8")
+            res = check_publication.inspect(temp_path)
+            kinds = {f["kind"] for f in res["findings"] if f["file"] == "mcp_config.json"}
+            self.assertIn("nonempty_api_key", kinds)
+            self.assertIn("nonempty_mcp_secret", kinds)
 
 
 class TestMentionChatMCPEndToEnd(unittest.TestCase):

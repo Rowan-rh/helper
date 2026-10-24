@@ -103,9 +103,9 @@ python tools/init_config.py
 #### 内置网页搜索（web_search）
 支持 4 种搜索引擎 Provider：
 - `tavily`（默认）：`base_url: "https://api.tavily.com"`，国内/海外通用，配置 `api_key: "${TAVILY_API_KEY}"`。
-- `bocha`（博查）：`base_url: "https://api.bochaai.com/v1"`，面向中文场景优化，配置 `api_key: "${BOCHA_API_KEY}"`。
-- `brave`：`base_url: "https://api.search.brave.com/res/v1"`，独立索引，配置 `api_key: "${BRAVE_API_KEY}"`。
-- `searxng`：自建 SearXNG 元搜索引擎实例，`base_url: "https://your-searxng-instance/search"`，支持无密钥（须在 SearXNG 服务端开启 JSON 输出格式）。
+- `bocha`（博查）：`base_url: "https://api.bochaai.com"`，面向中文场景优化，配置 `api_key: "${BOCHA_API_KEY}"`。
+- `brave`：`base_url: "https://api.search.brave.com"`，独立索引，配置 `api_key: "${BRAVE_API_KEY}"`。
+- `searxng`：自建 SearXNG 元搜索引擎实例，`base_url: "https://your-searxng-instance"`（填根域名或带 `/search` 均可），支持无密钥（须在 SearXNG 服务端开启 JSON 输出格式）。
 
 #### 外部 MCP Server 接入
 支持两类 MCP 传输协议：
