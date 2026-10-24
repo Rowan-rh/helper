@@ -144,6 +144,8 @@ class Plugin:
         if message.is_group:
             if message.chat_id not in self.members.groups:
                 return
+            if message.data.get("reminder_intent"):
+                return
             account = self.members.account
             raw_text = message.text.strip()
 

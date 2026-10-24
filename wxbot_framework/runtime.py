@@ -14,6 +14,7 @@ from .plugins import PluginManager
 from .sdk import ServiceFacade
 from .members import MemberStore
 from .personality import prepare_switch
+from .reminders import ReminderScheduler, ReminderStore, prepare_reminder
 
 logger = logging.getLogger("Bot")
 
@@ -24,10 +25,19 @@ class BotApplication:
         self.config = store.load()
         self.service = ServiceFacade(text_delay=self.config.get("text_send_delay"))
         self.members = MemberStore.from_config(self.config, self.store.path.parent)
+        # 提醒依赖成员目录的固定账号与 groups；数据库在首次使用时才创建。
+        self.reminders = (ReminderStore.default(self.members.account, self.store.path.parent)
+                          if self.members is not None else None)
         generic = self.config.get("backend") == "native_text"
         capabilities = TEXT_CAPABILITIES if generic else CAPABILITIES
         self.plugins = PluginManager(root / "plugins", store, self.service, capabilities,
-                                     self.config.get("plugin_queue_size", 128), member_store=self.members)
+                                     self.config.get("plugin_queue_size", 128), member_store=self.members,
+                                     reminder_store=self.reminders)
+        self.scheduler = (ReminderScheduler(self.reminders, self.members, self._send_reminder,
+                                            is_active=lambda: self.plugins.is_active("reminder"),
+                                            ready=self._reminder_ready,
+                                            allowlist=self.config.get("chat_allowlist", []))
+                          if self.reminders is not None else None)
         backend_type = NativeTextBackend if generic else NativeFileHelperBackend
         self.backend_factory = backend_factory or (lambda: backend_type(root, self.config))
         self.backend = None
@@ -60,6 +70,22 @@ class BotApplication:
             self._log_connection_error(error)
             self._disconnect()
 
+    def _send_reminder(self, room, content, at_list, display_names):
+        # 不绑定建提醒时的连接会话，重连后仍可发送。
+        return self.service.send_at_text(room, content, at_list, expected_session=None, display_names=display_names)
+
+    def _reminder_ready(self):
+        """已连接，且后端识别到的当前账号与提醒所属账号一致。"""
+        backend = self.backend
+        if not self._connection_ready or backend is None or not self.service.connected:
+            return False
+        if not callable(getattr(backend, "send_at_text", None)):
+            return False
+        raw = getattr(backend, "raw", None)
+        if raw is not None and hasattr(raw, "self_wxid"):
+            return raw.self_wxid == self.members.account
+        return True
+
     def _emit(self, message):
         allowed = self.config.get("chat_allowlist", [])
         if not allowed or message.chat_id in allowed:
@@ -71,6 +97,8 @@ class BotApplication:
             if message.data.get("dispatch_to_plugins", True):
                 if self.plugins.is_active("personality"):
                     message = prepare_switch(message, self.members)
+                if self.plugins.is_active("reminder"):
+                    message = prepare_reminder(message, self.members)
                 self.plugins.dispatch(message)
 
     def _disconnect(self):
@@ -142,6 +170,8 @@ class BotApplication:
             if self.members is not None:
                 self.members.initialize()
             self.plugins.reload()
+            if self.scheduler is not None:
+                self.scheduler.start()
             if self.config.get("console", True):
                 threading.Thread(target=self._read_console, name="BotConsole", daemon=True).start()
             logger.info("框架已启动；输入 help 查看插件管理命令，Ctrl+C 退出")
@@ -154,6 +184,8 @@ class BotApplication:
                     except Exception:
                         # 跨天清理失败不终止框架，记录后下个周期重试。
                         logger.exception("群文本滚动清理失败")
+                if self.scheduler is not None:
+                    self.scheduler.restart_if_dead()
                 if seconds and now - started >= seconds:
                     break
                 while True:
@@ -184,8 +216,12 @@ class BotApplication:
     def stop(self):
         self.stop_event.set()
         self.service.cancel_pending()
+        if self.scheduler is not None:
+            self.scheduler.stop()
         self.plugins.shutdown()
         cleaned = self._disconnect()
+        if self.reminders is not None:
+            self.reminders.close()
         if self.members is not None:
             self.members.close()
         if not cleaned:
