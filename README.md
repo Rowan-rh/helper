@@ -35,13 +35,14 @@ python tools/init_config.py
 ```
 
 1. `bot_config.json`：将 `wechat_account` 改为自己的机器人微信 ID。绑定保存的是账号 ID，重新登录后 PID 改变不影响选择；多开时会等待指定账号，不改用其他账号。
-2. `members_config.json`：在 `groups` 中添加自己要启用的群 ID，成员列表可以为空：
+2. `members_config.json`：在 `groups` 中添加自己要启用的群 ID，成员列表可以为空。若希望对所有群聊开放，可配置 `"allow_all_groups": true`（配合 `bot_config.json` 中的 `"chat_allowlist": []` 可对所有群聊开放 `@机器人`，`agent_vip_wxids` 仍仅控制私聊与群记忆写入）：
 
 ```json
 {
   "database_file": ".runtime/member_data.sqlite3",
   "history_enabled": true,
   "daily_clear": true,
+  "allow_all_groups": false,
   "groups": {
     "12345678@chatroom": []
   }
@@ -69,6 +70,7 @@ python tools/init_config.py
   "database_file": ".runtime/member_data.sqlite3",
   "history_enabled": true,
   "daily_clear": true,
+  "allow_all_groups": false,
   "agent_vip_wxids": [
     "wxid_example_vip"
   ],
