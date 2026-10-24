@@ -51,6 +51,10 @@ class PersonalityTests(unittest.TestCase):
         self.ctx._llm = Mock(complete_chat=fake_chat)
         plugin = ChatPlugin()
         plugin.on_load(self.ctx)
+        # ChatPlugin.on_load 会创建 GroupMemoryStore（惰性打开 sqlite），
+        # 必须在临时目录删除前卸载关闭句柄，否则 Windows 上报 WinError 32。
+        # addCleanup 后进先出：卸载比 setUp 登记的临时目录清理更早执行。
+        self.addCleanup(plugin.on_unload, self.ctx)
         return plugin
 
     def test_personality_persists_and_isolated_from_other_groups_accounts_and_clear(self):
