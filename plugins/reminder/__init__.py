@@ -13,14 +13,17 @@ from datetime import datetime
 
 from wxbot_framework.members import BEIJING
 from wxbot_framework.mentions import strip_at_labels
-from wxbot_framework.reminders import ReminderError, ReminderParseError
-from .parser import format_error, parse
+from wxbot_framework.reminders import ReminderError
+from .parser import ReminderParseError, format_error, parse
 
 VIEW_COMMANDS = frozenset({"/我的提醒", "/提醒列表", "我的提醒", "查看提醒", "提醒列表"})
 CANCEL_ALL_COMMANDS = frozenset({"/取消全部提醒", "取消全部提醒", "/取消提醒 全部", "取消提醒 全部"})
 
 
 class Plugin:
+    def __init__(self, clock=time.time):
+        self.clock = clock
+
     def on_load(self, ctx):
         self.members = ctx.members
         self.reminders = ctx.reminders
@@ -101,7 +104,7 @@ class Plugin:
         bot_account = self.members.account
         has_other_mentions = any(m != bot_account for m in at_members)
 
-        now_ts = time.time()
+        now_ts = self.clock()
         try:
             parsed = parse(raw_text, now_ts, has_other_mentions=has_other_mentions)
         except (ReminderError, ReminderParseError) as err:
