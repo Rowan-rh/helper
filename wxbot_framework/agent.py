@@ -309,6 +309,7 @@ class ToolSpec:
     parameters_schema: Mapping
     handler: Callable[[ToolContext, dict], Any]
     write: bool = False
+    privileged_only: bool = True
 
     def __post_init__(self):
         if not isinstance(self.name, str) or not _TOOL_NAME.fullmatch(self.name):
@@ -329,6 +330,8 @@ class ToolSpec:
             raise ValueError(f"工具 {self.name} 的 required 必须是已声明参数的列表")
         if type(self.write) is not bool:
             raise ValueError("write 应为布尔值")
+        if type(self.privileged_only) is not bool:
+            raise ValueError("privileged_only 应为布尔值")
         if not callable(self.handler):
             raise ValueError(f"工具 {self.name} 的 handler 不可调用")
         # 冻结 schema，避免注册后被外部修改。
@@ -450,7 +453,7 @@ class ToolExecutor:
             return _dumps({"ok": False, "error": call["error"]})
         arguments = call.get("arguments") if isinstance(call.get("arguments"), dict) else {}
         if spec.write:
-            if not self.context.privileged:
+            if spec.privileged_only and not self.context.privileged:
                 return _dumps({"ok": False, "error": "无权限"})
             if self.write_calls >= self.config.max_write_calls:
                 return _dumps({"ok": False, "error": "本次对话的写入次数已达上限"})
@@ -484,9 +487,15 @@ class ToolExecutor:
 
 # ---------------------------------------------------------------- 系统提示词
 
-def build_system_prompt(*, base=AGENT_SYSTEM, persona=None, memory=None, background=None, with_tools=True):
-    """组装系统提示词：功能说明 + 不可信数据声明 + 长期记忆快照 + 背景 + 人格（最高优先级放最后）。"""
+def build_system_prompt(*, base=AGENT_SYSTEM, persona=None, memory=None, background=None,
+                        with_tools=True, now_text=None):
+    """组装系统提示词：功能说明 + 当前时间 + 不可信数据声明 + 长期记忆快照 + 背景 + 人格（最高优先级放最后）。"""
     parts = [base.strip()]
+    if isinstance(now_text, str) and now_text.strip():
+        stripped_now = now_text.strip()
+        if not stripped_now.startswith("当前北京时间"):
+            stripped_now = f"当前北京时间：{stripped_now}"
+        parts.append(stripped_now)
     if with_tools:
         parts.append(UNTRUSTED_NOTICE)
     else:
@@ -514,6 +523,7 @@ class AgentRequest:
     memory_snapshot: Callable[[], str] | None = None
     background: tuple = ()
     guard: Callable[[], Any] | None = None
+    now_text: str | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -577,7 +587,7 @@ class Agent:
 
         def system(final=False):
             prompt = build_system_prompt(persona=request.persona, memory=memory, background=background,
-                                         with_tools=tools is not None)
+                                         with_tools=tools is not None, now_text=request.now_text)
             return prompt + "\n\n" + FINAL_ROUND_NOTICE if final else prompt
 
         history = []

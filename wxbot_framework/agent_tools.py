@@ -1,23 +1,48 @@
-"""Agent 群内安全工具集（首批 6 个工具，纯本地零外网依赖）。
+"""Agent 群内安全工具集（纯本地零外网依赖）。
 
 - 4 个群类只读工具：get_group_context、get_member_recent_messages、list_group_members、get_group_status
   - 在非群会话（私聊、文件传输助手）中调用时，返回 {"ok": false, "error": "非群会话"}。
   - 读取历史记录时过滤 bot_generated、斜杠命令与语气词。
   - 返回结果脱敏：禁止出现 wxid_* 或 *@chatroom，统一使用称呼或稳定匿名编号 P*。
-- 2 个受控写工具：memory_save、memory_delete
-  - write=True，由 ToolExecutor 统一进行 VIP/主号权限与调用次数限制。
+- 2 个受控记忆写工具：memory_save、memory_delete
+  - write=True, privileged_only=True，由 ToolExecutor 统一进行 VIP/主号权限与调用次数限制。
   - 操作保证幂等，返回当前记忆状态（编号与条数）。
+- 3 个可选群聊提醒工具（include_reminders=True 时启用）：reminder_create、reminder_list、reminder_cancel
+  - 来源会话 (account, room, sender_id) 强制由 ToolContext 绑定，不开放给模型参数。
+  - reminder_create / reminder_cancel 为 write=True, privileged_only=False（允许普通群友操作本人数据，仍受 max_write_calls 限制）。
 """
 from __future__ import annotations
 
 import re
+import time
 from datetime import datetime, timezone
 from typing import Any
 
 from .agent import ToolContext, ToolError, ToolRegistry, ToolSpec, is_filler
 from .members import BEIJING
 from .memory import GroupMemoryStore
+from .reminder_parser import (
+    INVALID_CONTENT_TIP,
+    NO_REPEAT_TIP,
+    ONLY_SELF_TIP,
+    RE_PERIODIC,
+    SUPPLEMENT_TIME_TIP,
+    USAGE_TIP,
+    ReminderParseError,
+    format_error,
+)
+from .reminders import (
+    PER_MEMBER_LIMIT,
+    ReminderError,
+    ReminderLimit,
+    ReminderStore,
+    ReminderTimeError,
+    validate_content,
+)
 from .summary import CONTROL
+
+WEEKDAY_NAMES = ("星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日")
+REMINDER_GROUP_ONLY_ERROR = "仅支持在群聊中管理提醒"
 
 _WXID_PATTERN = re.compile(r"wxid_[a-zA-Z0-9_-]+", re.IGNORECASE)
 _CHATROOM_PATTERN = re.compile(r"[a-zA-Z0-9_-]+@chatroom", re.IGNORECASE)
@@ -329,11 +354,301 @@ def handle_memory_delete(context: ToolContext, arguments: dict) -> dict:
     return memory_store.delete(context.account, context.room, entry_id)
 
 
+# ---------------------------------------------------------------- 7–9. 群聊定时提醒工具
+
+def format_beijing_now(now_value: Any = None) -> str:
+    """格式化当前北京时间，供群聊提醒工具注入系统提示词。"""
+    if now_value is None:
+        dt = datetime.now(timezone.utc).astimezone(BEIJING)
+    elif isinstance(now_value, (int, float)):
+        dt = datetime.fromtimestamp(now_value, BEIJING)
+    elif isinstance(now_value, datetime):
+        dt = now_value.astimezone(BEIJING) if now_value.tzinfo is not None else now_value.replace(tzinfo=BEIJING)
+    else:
+        raise TypeError("now_value 必须是 datetime 或数值时间戳")
+    return f"当前北京时间：{dt.strftime('%Y-%m-%d %H:%M')}（{WEEKDAY_NAMES[dt.weekday()]}）"
+
+
+def _current_timestamp(context: ToolContext) -> float:
+    now_fn = context.extras.get("now_fn")
+    raw = now_fn() if callable(now_fn) else time.time()
+    if isinstance(raw, datetime):
+        dt = raw.astimezone(BEIJING) if raw.tzinfo is not None else raw.replace(tzinfo=BEIJING)
+        return dt.timestamp()
+    return float(raw)
+
+
+_DATE_ONLY_PATTERN = re.compile(
+    r"^(?:\d{4}[-/.年]\d{1,2}[-/.月]\d{1,2}[日号]?|\d{1,2}[-/.月]\d{1,2}[日号]?|今天|今日|明天|明日|后天|大后天|"
+    r"(?:本|这|下)?(?:周|星期|礼拜)[一二三四五六七日天])$"
+)
+
+
+def _parse_due_at_arg(due_at_str: str) -> float:
+    s = due_at_str.strip()
+    if not s:
+        raise ReminderParseError(USAGE_TIP)
+    if _DATE_ONLY_PATTERN.fullmatch(s):
+        raise ReminderParseError(SUPPLEMENT_TIME_TIP)
+    if ":" not in s:
+        raise ReminderParseError(SUPPLEMENT_TIME_TIP)
+
+    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S"):
+        try:
+            return datetime.strptime(s, fmt).replace(tzinfo=BEIJING).timestamp()
+        except ValueError:
+            pass
+
+    iso_s = s[:-1] + "+00:00" if s.endswith(("Z", "z")) else s
+    if not re.match(r"^\d{4}-\d{2}-\d{2}[T ]", iso_s):
+        raise ReminderParseError(
+            "due_at 格式不正确，请提供北京时间 'YYYY-MM-DD HH:MM' 或带时区的完整 ISO 时间字符串。"
+        )
+    try:
+        dt = datetime.fromisoformat(iso_s)
+    except ValueError as err:
+        raise ReminderParseError(
+            "due_at 格式不正确，请提供北京时间 'YYYY-MM-DD HH:MM' 或带时区的完整 ISO 时间字符串。"
+        ) from err
+
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=BEIJING)
+    return dt.timestamp()
+
+
+REMINDER_CREATE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "content": {
+            "type": "string",
+            "description": "提醒事项内容，1–100 字单行纯文本；仅支持为提问者本人设置单次提醒，不支持每天/每周等周期提醒",
+        },
+        "due_at": {
+            "type": "string",
+            "description": "目标触发时刻（北京时间 'YYYY-MM-DD HH:MM' 或带时区的 ISO 时间字符串，必须含具体时分；与 delay_minutes 二选一）",
+        },
+        "delay_minutes": {
+            "type": "integer",
+            "description": "相对当前时间的延迟分钟数（正整数，如一刻钟为 15、半小时为 30；与 due_at 二选一）",
+            "minimum": 1,
+        },
+    },
+    "required": ["content"],
+    "additionalProperties": False,
+}
+
+
+def handle_reminder_create(context: ToolContext, arguments: dict) -> dict:
+    if not context.is_group:
+        return {"ok": False, "error": REMINDER_GROUP_ONLY_ERROR}
+
+    reminder_active = context.extras.get("reminder_active")
+    if reminder_active is not None:
+        active = reminder_active() if callable(reminder_active) else bool(reminder_active)
+        if not active:
+            return {"ok": False, "error": "提醒插件已停用，暂时无法设置提醒。"}
+
+    reminder_store: ReminderStore | None = context.extras.get("reminder_store")
+    if reminder_store is None:
+        return {"ok": False, "error": "提醒存储未配置"}
+
+    if context.extras.get("has_other_mentions"):
+        return {"ok": False, "error": ONLY_SELF_TIP}
+
+    raw_content = arguments.get("content")
+    try:
+        content_text = validate_content(raw_content)
+    except ReminderError:
+        return {"ok": False, "error": INVALID_CONTENT_TIP}
+
+    if RE_PERIODIC.search(content_text):
+        return {"ok": False, "error": NO_REPEAT_TIP}
+    if re.match(r"^提醒(?:他人|大家|全体|大伙|别人|他|她|他们|她们)", content_text):
+        return {"ok": False, "error": ONLY_SELF_TIP}
+
+    due_at_arg = arguments.get("due_at")
+    delay_arg = arguments.get("delay_minutes")
+    has_due = due_at_arg is not None and (not isinstance(due_at_arg, str) or bool(due_at_arg.strip()))
+    has_delay = delay_arg is not None
+
+    if due_at_arg is not None and isinstance(due_at_arg, str) and not due_at_arg.strip() and not has_delay:
+        return {"ok": False, "error": SUPPLEMENT_TIME_TIP}
+    if has_due and has_delay:
+        return {"ok": False, "error": "due_at 与 delay_minutes 只能二选一，请勿同时指定。"}
+    if not has_due and not has_delay:
+        return {"ok": False, "error": "请指定 due_at（具体提醒时刻）或 delay_minutes（延迟分钟数）其中之一。"}
+
+    now_ts = _current_timestamp(context)
+    if has_delay:
+        if type(delay_arg) is not int or delay_arg < 1:
+            return {"ok": False, "error": format_error(ReminderTimeError("too_soon"))}
+        due_ts = now_ts + delay_arg * 60.0
+    else:
+        if not isinstance(due_at_arg, str):
+            return {"ok": False, "error": USAGE_TIP}
+        try:
+            due_ts = _parse_due_at_arg(due_at_arg)
+        except (ReminderParseError, ReminderError) as err:
+            return {"ok": False, "error": sanitize_text(format_error(err))}
+
+    try:
+        reminder = reminder_store.create(
+            context.room,
+            context.sender_id,
+            due_ts,
+            content_text,
+            now=now_ts,
+        )
+    except (ReminderLimit, ReminderTimeError, ReminderError) as err:
+        return {"ok": False, "error": sanitize_text(format_error(err, due_at=due_ts))}
+
+    due_at_beijing = datetime.fromtimestamp(reminder.due_at, BEIJING).strftime("%Y-%m-%d %H:%M")
+    safe_content = sanitize_text(reminder.content)
+    confirmation = f"已设置提醒 [#{reminder.number}]：{due_at_beijing} 提醒你「{safe_content}」"
+    return {
+        "ok": True,
+        "number": reminder.number,
+        "due_at_beijing": due_at_beijing,
+        "content": safe_content,
+        "message": confirmation,
+    }
+
+
+REMINDER_LIST_SCHEMA = {
+    "type": "object",
+    "properties": {},
+    "additionalProperties": False,
+}
+
+
+def handle_reminder_list(context: ToolContext, arguments: dict) -> dict:
+    if not context.is_group:
+        return {"ok": False, "error": REMINDER_GROUP_ONLY_ERROR}
+
+    reminder_store: ReminderStore | None = context.extras.get("reminder_store")
+    if reminder_store is None:
+        return {"ok": False, "error": "提醒存储未配置"}
+
+    rows = reminder_store.list_pending(context.room, context.sender_id)
+    items = [
+        {
+            "number": row.number,
+            "due_at_beijing": datetime.fromtimestamp(row.due_at, BEIJING).strftime("%Y-%m-%d %H:%M"),
+            "content": sanitize_text(row.content),
+        }
+        for row in rows
+    ]
+    return {
+        "ok": True,
+        "reminders": items,
+        "count": len(items),
+        "limit": PER_MEMBER_LIMIT,
+    }
+
+
+REMINDER_CANCEL_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "number": {
+            "type": "integer",
+            "description": "要取消的待触发提醒编号（1–5），与 cancel_all 二选一",
+            "minimum": 1,
+        },
+        "cancel_all": {
+            "type": "boolean",
+            "description": "设为 true 时取消提问者本人在本群的全部待触发提醒，与 number 二选一",
+        },
+    },
+    "additionalProperties": False,
+}
+
+
+def handle_reminder_cancel(context: ToolContext, arguments: dict) -> dict:
+    if not context.is_group:
+        return {"ok": False, "error": REMINDER_GROUP_ONLY_ERROR}
+
+    reminder_store: ReminderStore | None = context.extras.get("reminder_store")
+    if reminder_store is None:
+        return {"ok": False, "error": "提醒存储未配置"}
+
+    number = arguments.get("number")
+    cancel_all = arguments.get("cancel_all", False)
+    has_number = number is not None
+
+    if has_number and cancel_all is True:
+        return {"ok": False, "error": "number 与 cancel_all 只能二选一，请勿同时指定。"}
+    if not has_number and cancel_all is not True:
+        return {"ok": False, "error": "请指定要取消的提醒编号 number，或设置 cancel_all=true 取消全部提醒。"}
+
+    if cancel_all is True:
+        count = reminder_store.cancel_all(context.room, context.sender_id)
+        if count > 0:
+            msg = f"已取消你在本群的全部待触发提醒（共 {count} 条）。"
+        else:
+            msg = "你在本群暂无待触发的提醒。"
+        return {
+            "ok": True,
+            "cancelled_count": count,
+            "message": msg,
+        }
+
+    if type(number) is not int or number < 1:
+        return {"ok": False, "error": "请指定有效的提醒编号，例如：1"}
+    row = reminder_store.cancel(context.room, context.sender_id, number)
+    if row is None:
+        return {
+            "ok": False,
+            "error": f"未找到你的待触发提醒 #{number}，请发送 /我的提醒 查看。",
+        }
+    dt_str = datetime.fromtimestamp(row.due_at, BEIJING).strftime("%Y-%m-%d %H:%M")
+    safe_content = sanitize_text(row.content)
+    return {
+        "ok": True,
+        "number": row.number,
+        "due_at_beijing": dt_str,
+        "content": safe_content,
+        "message": f"已取消提醒 [#{row.number}]（{dt_str} {safe_content}）。",
+    }
+
+
 # ---------------------------------------------------------------- 工具工厂与注册
 
-def create_agent_tool_specs() -> tuple[ToolSpec, ...]:
-    """创建标准群内 6 工具规格。"""
+def create_reminder_tool_specs() -> tuple[ToolSpec, ...]:
+    """创建群聊提醒 3 工具规格（来源会话与创建人强制由 ToolContext 绑定）。"""
     return (
+        ToolSpec(
+            name="reminder_create",
+            description=(
+                "为当前提问者本人在本群创建单次定时提醒，到点后机器人会在群内自动 @ 本人。"
+                "需要提供事项 content，并二选一提供 delay_minutes（延迟正整数分钟）或 due_at（北京时间 'YYYY-MM-DD HH:MM'）。"
+                "不支持周期重复提醒，不支持替他人设置；回复时请保留返回的编号 [#N] 与提醒时间。"
+            ),
+            parameters_schema=REMINDER_CREATE_SCHEMA,
+            handler=handle_reminder_create,
+            write=True,
+            privileged_only=False,
+        ),
+        ToolSpec(
+            name="reminder_list",
+            description="查看当前提问者本人在本群尚未触发的定时提醒列表（编号、北京时间、事项与配额占用）。",
+            parameters_schema=REMINDER_LIST_SCHEMA,
+            handler=handle_reminder_list,
+            write=False,
+        ),
+        ToolSpec(
+            name="reminder_cancel",
+            description="取消当前提问者本人在本群的待触发提醒（指定 number 取消单条，或指定 cancel_all=true 取消全部）。",
+            parameters_schema=REMINDER_CANCEL_SCHEMA,
+            handler=handle_reminder_cancel,
+            write=True,
+            privileged_only=False,
+        ),
+    )
+
+
+def create_agent_tool_specs(*, include_reminders: bool = False) -> tuple[ToolSpec, ...]:
+    """创建群内工具规格；默认仅含基础 6 工具，include_reminders=True 时附加 3 个提醒工具。"""
+    base = (
         ToolSpec(
             name="get_group_context",
             description="获取当前微信群今日最近发言记录（已过滤机器人自发文本、命令与语气词）。",
@@ -377,8 +692,11 @@ def create_agent_tool_specs() -> tuple[ToolSpec, ...]:
             write=True,
         ),
     )
+    if include_reminders:
+        return base + create_reminder_tool_specs()
+    return base
 
 
-def create_agent_tool_registry() -> ToolRegistry:
-    """创建包含标准 6 工具的 ToolRegistry。"""
-    return ToolRegistry(create_agent_tool_specs())
+def create_agent_tool_registry(*, include_reminders: bool = False) -> ToolRegistry:
+    """创建包含群内工具的 ToolRegistry（include_reminders=False 时保持标准 6 工具）。"""
+    return ToolRegistry(create_agent_tool_specs(include_reminders=include_reminders))

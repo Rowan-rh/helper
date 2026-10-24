@@ -435,10 +435,39 @@ class ReminderTicker(threading.Thread):
 
 
 REMINDER_COMMANDS = frozenset({"/提醒", "/我的提醒", "/提醒列表", "/取消提醒", "/取消全部提醒"})
+_REMINDER_VIEW_COMMANDS = frozenset({"/我的提醒", "/提醒列表", "我的提醒", "查看提醒", "提醒列表"})
+_REMINDER_CANCEL_ALL_COMMANDS = frozenset({"/取消全部提醒", "取消全部提醒", "/取消提醒 全部", "取消提醒 全部"})
 
 
-def prepare_reminder(message, members):
-    """分发前只标记提醒意图，供 mention_chat 让路；不解析时间、不写库。"""
+def _rule_claims_at_reminder(text, message, members, now=None):
+    """判断 @机器人 含“提醒”的消息是否应由规则插件直接接管。
+
+    确定性查看/取消命令、规则可解析的输入、以及命中明确策略拒绝
+    （周期词、替他人/@他人、仅日期无时刻、已过时间、时长超界、事项不合法）均由规则处理；
+    仅当落入通用未识别（USAGE_TIP）时返回 False，交由 mention_chat Agent 处理。
+    """
+    from .reminder_parser import USAGE_TIP, ReminderParseError, parse
+
+    stripped = strip_at_labels(text).strip()
+    if stripped in _REMINDER_VIEW_COMMANDS or stripped in _REMINDER_CANCEL_ALL_COMMANDS:
+        return True
+    words = stripped.split()
+    if words and words[0] in ("/取消提醒", "取消提醒"):
+        return True
+
+    at_members = message.data.get("at_members", ())
+    has_other_mentions = any(m != members.account for m in at_members)
+    try:
+        parse(text, now_beijing=now, has_other_mentions=has_other_mentions)
+        return True
+    except ReminderParseError as err:
+        return str(err) != USAGE_TIP
+    except ReminderError:
+        return True
+
+
+def prepare_reminder(message, members, *, agent_fallback=False, now=None):
+    """分发前只标记提醒意图，供 mention_chat 让路；不写库。"""
     if members is None or message.type != 1 or not message.is_group or message.chat_id not in members.groups:
         return message
     if not message.data.get("dispatch_to_plugins", True) or message.data.get("bot_generated"):
@@ -450,6 +479,8 @@ def prepare_reminder(message, members):
     else:
         intent = bool(message.data.get("is_at_self") and members.account in message.data.get("at_members", ()) and
                       "WXBOT_AT_CHAT_PROBE" not in text and "提醒" in strip_at_labels(text))
+        if intent and agent_fallback:
+            intent = _rule_claims_at_reminder(text, message, members, now=now)
     if not intent:
         return message
     data = dict(message.data)
