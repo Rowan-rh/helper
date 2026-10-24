@@ -177,7 +177,7 @@ class LegacyService:
 
 class PluginContext:
     def __init__(self, name, options, service, capabilities, *, llm_config_path=None, member_store=None,
-                 reminder_store=None):
+                 reminder_store=None, plugin_active_check=None):
         self.name = name
         self.config = MappingProxyType(copy.deepcopy(options))
         self.logger = logging.getLogger(f"Plugin.{name}")
@@ -187,6 +187,13 @@ class PluginContext:
         self._llm = None
         self._members = member_store
         self._reminders = reminder_store
+        self._plugin_active_check = plugin_active_check
+
+    def is_plugin_active(self, name):
+        """检查指定插件当前是否处于启用运行状态（未接入管理器时默认视为启用）。"""
+        if self._plugin_active_check is None:
+            return True
+        return bool(self._plugin_active_check(name))
 
     @property
     def members(self):

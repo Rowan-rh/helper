@@ -98,7 +98,11 @@ class BotApplication:
                 if self.plugins.is_active("personality"):
                     message = prepare_switch(message, self.members)
                 if self.plugins.is_active("reminder"):
-                    message = prepare_reminder(message, self.members)
+                    message = prepare_reminder(
+                        message,
+                        self.members,
+                        agent_fallback=self.plugins.is_active("mention_chat"),
+                    )
                 self.plugins.dispatch(message)
 
     def _disconnect(self):

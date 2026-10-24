@@ -156,7 +156,8 @@ class PluginManager:
         options = self.config.get("plugins", {}).get(spec.name, {})
         context = PluginContext(spec.name, options, self.service, self.capabilities,
                                 llm_config_path=self.store.path.parent / self.config.get("llm_config_file", "llm_config.json"),
-                                member_store=self.member_store, reminder_store=self.reminder_store)
+                                member_store=self.member_store, reminder_store=self.reminder_store,
+                                plugin_active_check=self.is_active)
         # 每次使用独立模块名并重新编译源文件，热重载不复用旧入口字节码。
         if "_wxbot_plugins" not in sys.modules:
             package = types.ModuleType("_wxbot_plugins")
