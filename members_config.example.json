@@ -2,6 +2,7 @@
   "database_file": ".runtime/member_data.sqlite3",
   "history_enabled": true,
   "daily_clear": true,
+  "allow_all_groups": false,
   "agent_vip_wxids": [],
   "groups": {}
 }

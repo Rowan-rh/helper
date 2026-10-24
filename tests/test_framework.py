@@ -73,7 +73,8 @@ class FrameworkTests(unittest.TestCase):
         self.assertTrue(self.root.is_relative_to(SCRATCH.resolve()))
         shutil.copytree(ROOT / "plugins", self.root / "plugins")
         self.path = self.root / "bot_config.json"
-        self.config = json.loads((ROOT / "bot_config.json").read_text(encoding="utf-8"))
+        config_file = ROOT / "bot_config.json" if (ROOT / "bot_config.json").exists() else ROOT / "bot_config.example.json"
+        self.config = json.loads(config_file.read_text(encoding="utf-8"))
         self.config.update(console=False, reconnect_seconds=0.1, text_send_delay={"enabled": False})
         # 框架测试不调用外部大模型；玩法单独用假客户端验证。
         self.config["plugins"]["idiom_chain"]["enabled"] = False
@@ -82,6 +83,7 @@ class FrameworkTests(unittest.TestCase):
         self.config["plugins"]["chat_records"]["enabled"] = False
         self.config["plugins"]["personality"]["enabled"] = False
         self.config["plugins"]["mention_chat"]["enabled"] = False
+        self.config["plugins"].setdefault("reminder", {})["enabled"] = False
         self.config["members_config_file"] = None
         self.write_config()
         self.store = ConfigStore(self.path)
