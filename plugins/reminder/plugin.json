@@ -4,7 +4,6 @@
   "requires": [
     "text.receive",
     "group.text.receive",
-    "group.text.send",
-    "group.text.mention"
+    "group.text.send"
   ]
 }

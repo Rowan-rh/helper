@@ -14,7 +14,7 @@ from datetime import datetime
 from wxbot_framework.members import BEIJING
 from wxbot_framework.mentions import strip_at_labels
 from wxbot_framework.reminders import ReminderError
-from .parser import ReminderParseError, format_error, parse
+from .parser import ReminderParseError, USAGE_TIP, format_error, parse
 
 VIEW_COMMANDS = frozenset({"/我的提醒", "/提醒列表", "我的提醒", "查看提醒", "提醒列表"})
 CANCEL_ALL_COMMANDS = frozenset({"/取消全部提醒", "取消全部提醒", "/取消提醒 全部", "取消提醒 全部"})
@@ -111,7 +111,8 @@ class Plugin:
             ctx.reply(message, format_error(err))
             return
         except Exception as err:
-            ctx.reply(message, format_error(err))
+            ctx.logger.warning("解析提醒命令发生未预期异常: %s: %s", type(err).__name__, err)
+            ctx.reply(message, USAGE_TIP)
             return
 
         try:
@@ -124,6 +125,10 @@ class Plugin:
             )
         except ReminderError as err:
             ctx.reply(message, format_error(err, due_at=parsed.due_at))
+            return
+        except Exception as err:
+            ctx.logger.warning("创建提醒发生未预期异常: %s: %s", type(err).__name__, err)
+            ctx.reply(message, "设置提醒失败，请稍后重试。")
             return
 
         dt_str = datetime.fromtimestamp(reminder.due_at, BEIJING).strftime("%Y-%m-%d %H:%M")

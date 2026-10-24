@@ -100,6 +100,14 @@ class ReminderParserTestCase(unittest.TestCase):
             ("20:30 提交周报", datetime(2026, 10, 24, 20, 30, 0, tzinfo=BEIJING), "提交周报"),
             ("下午3点半 开会", datetime(2026, 10, 24, 15, 30, 0, tzinfo=BEIJING), "开会"),
             ("下午4点 开会", datetime(2026, 10, 24, 16, 0, 0, tzinfo=BEIJING), "开会"),
+            ("下午4点一起开会", datetime(2026, 10, 24, 16, 0, 0, tzinfo=BEIJING), "一起开会"),
+            ("明天9点一定交报告", datetime(2026, 10, 25, 9, 0, 0, tzinfo=BEIJING), "一定交报告"),
+            ("明天9点30 开会", datetime(2026, 10, 25, 9, 30, 0, tzinfo=BEIJING), "开会"),
+            ("明天9点30分 开会", datetime(2026, 10, 25, 9, 30, 0, tzinfo=BEIJING), "开会"),
+            ("明天9点提醒我检查每一个文件", datetime(2026, 10, 25, 9, 0, 0, tzinfo=BEIJING), "检查每一个文件"),
+            ("晚上12点 睡觉", datetime(2026, 10, 25, 0, 0, 0, tzinfo=BEIJING), "睡觉"),
+            ("今晚12点 睡觉", datetime(2026, 10, 25, 0, 0, 0, tzinfo=BEIJING), "睡觉"),
+            ("半夜12点 睡觉", datetime(2026, 10, 25, 0, 0, 0, tzinfo=BEIJING), "睡觉"),
             ("今晚20:30 提交周报", datetime(2026, 10, 24, 20, 30, 0, tzinfo=BEIJING), "提交周报"),
             ("今晚8点半 提交周报", datetime(2026, 10, 24, 20, 30, 0, tzinfo=BEIJING), "提交周报"),
             ("明天09:30 开会", datetime(2026, 10, 25, 9, 30, 0, tzinfo=BEIJING), "开会"),
@@ -198,6 +206,11 @@ class ReminderParserTestCase(unittest.TestCase):
         with self.assertRaises(ReminderError) as cm:
             parse("@机器人 10分钟后提醒我 关火\n关电闸", BASE_NOW)
         self.assertIn("1–100 个字符", format_error(cm.exception))
+
+        # 8. 非法中文数字异常拦截并转换为用法提示，不泄露内部描述
+        with self.assertRaises(ReminderParseError) as cm:
+            parse("@机器人 一二三分钟后提醒我喝水", BASE_NOW)
+        self.assertIn("未识别到有效的提醒时间或事项", str(cm.exception))
 
 
 class ReminderPluginTestCase(unittest.TestCase):
@@ -364,6 +377,13 @@ class ReminderPluginTestCase(unittest.TestCase):
         self.plugin.on_message(remind_msg, self.ctx)
         self.assertEqual(len(self.ctx.replies), 1)
         self.assertIn("已设置提醒 [#1]", self.ctx.replies[-1][2])
+
+    def test_invalid_number_plugin_reply(self):
+        """验证一二三等非法中文数字在插件层兜底回复用法提示，且不泄露异常内部描述。"""
+        msg = make_group_message("@机器人 一二三分钟后提醒我喝水", sender=ALICE, room=ROOM,
+                                 is_at_self=True, at_members=(ROBOT,), reminder_intent=True)
+        self.plugin.on_message(msg, self.ctx)
+        self.assertIn("未识别到有效的提醒时间或事项", self.ctx.replies[-1][2])
 
 
 if __name__ == "__main__":

@@ -50,6 +50,10 @@ def parse_zh_int(val: str) -> int:
         return int(val)
     if not val:
         raise ValueError("空数字")
+    if val == "零":
+        return 0
+    if val.startswith("零"):
+        return parse_zh_int(val[1:])
     if val == "十":
         return 10
     if val.startswith("十"):
@@ -65,7 +69,7 @@ def parse_zh_int(val: str) -> int:
 
 
 RE_PERIODIC = re.compile(
-    r"(?:每天|每日|每周|每个?星期|每个?礼拜|每个?月|每年|每隔|每[一二三四五六七日天]|工作日|节假日)"
+    r"(?:每天|每日|每周[一二三四五六七日天]?|每个?星期[一二三四五六七日天]?|每个?礼拜[一二三四五六七日天]?|每个?月|每年|每隔|工作日|节假日)"
 )
 
 RE_RELATIVE = re.compile(
@@ -96,7 +100,8 @@ RE_PERIOD = re.compile(
 RE_TIME = re.compile(
     r"^(?:"
     r"(?P<h_colon>\d{1,2}):(?P<m_colon>\d{2})|"
-    r"(?P<h_min>\d{1,2}|[一二两三四五六七八九十]+)\s*点\s*(?P<m_min>\d{1,2}|[一二两三四五六七八九十]+)\s*分?|"
+    r"(?P<h_min_fen>\d{1,2}|[一二两三四五六七八九十]+)\s*点\s*(?P<m_min_fen>\d{1,2}|[一二两三四五六七八九十]+)\s*分(?:钟)?|"
+    r"(?P<h_min_num>\d{1,2}|[一二两三四五六七八九十]+)\s*点\s*(?P<m_min_num>\d{2})(?!\d)|"
     r"(?P<h_half>\d{1,2}|[一二两三四五六七八九十]+)\s*点半|"
     r"(?P<h_whole>\d{1,2}|[一二两三四五六七八九十]+)\s*点(?:整)?|"
     r"(?P<h_shi>\d{1,2})\s*时\s*(?P<m_shi>\d{1,2})\s*分?"
@@ -210,9 +215,12 @@ def _match_absolute_time(s: str, now_dt: datetime) -> tuple[Optional[datetime], 
     if m_time.group("h_colon"):
         hour = int(m_time.group("h_colon"))
         minute = int(m_time.group("m_colon"))
-    elif m_time.group("h_min"):
-        hour = parse_zh_int(m_time.group("h_min"))
-        minute = parse_zh_int(m_time.group("m_min"))
+    elif m_time.group("h_min_fen"):
+        hour = parse_zh_int(m_time.group("h_min_fen"))
+        minute = parse_zh_int(m_time.group("m_min_fen"))
+    elif m_time.group("h_min_num"):
+        hour = parse_zh_int(m_time.group("h_min_num"))
+        minute = int(m_time.group("m_min_num"))
     elif m_time.group("h_half"):
         hour = parse_zh_int(m_time.group("h_half"))
         minute = 30
@@ -228,8 +236,20 @@ def _match_absolute_time(s: str, now_dt: datetime) -> tuple[Optional[datetime], 
     if hour > 23 or minute > 59:
         return None, 0, False
 
-    # 根据时段词微调小时
-    if period_val in ("下午", "傍晚", "晚上"):
+    if date_val is None:
+        date_val = now_dt.date()
+
+    # 根据时段词微调小时与跨日（如晚上12点/半夜12点指次日00:00）
+    if period_val in ("晚上", "半夜", "夜里"):
+        if hour == 12:
+            hour = 0
+            date_val += timedelta(days=1)
+        elif hour < 12:
+            if period_val == "晚上":
+                hour += 12
+            elif period_val in ("半夜", "夜里") and hour == 11:
+                hour = 23
+    elif period_val in ("下午", "傍晚"):
         if hour < 12:
             hour += 12
     elif period_val == "中午":
@@ -238,14 +258,6 @@ def _match_absolute_time(s: str, now_dt: datetime) -> tuple[Optional[datetime], 
     elif period_val in ("早上", "早晨", "清晨", "上午", "凌晨"):
         if hour == 12:
             hour = 0
-    elif period_val in ("半夜", "夜里"):
-        if hour == 12:
-            hour = 0
-        elif hour == 11:
-            hour = 23
-
-    if date_val is None:
-        date_val = now_dt.date()
 
     try:
         due_dt = datetime(date_val.year, date_val.month, date_val.day, hour, minute, 0, tzinfo=BEIJING)
@@ -325,16 +337,21 @@ def parse(text: str, now_beijing: Any = None, has_other_mentions: bool = False) 
         raise ReminderParseError(USAGE_TIP)
 
     # 4. 尝试解析时间
-    rel_res = _match_relative_time(s, now_dt)
-    if rel_res is not None:
-        due_dt, end_idx = rel_res
-    else:
-        abs_res, end_idx, had_date_without_time = _match_absolute_time(s, now_dt)
-        if had_date_without_time:
-            raise ReminderParseError(SUPPLEMENT_TIME_TIP)
-        if abs_res is None:
-            raise ReminderParseError(USAGE_TIP)
-        due_dt = abs_res
+    try:
+        rel_res = _match_relative_time(s, now_dt)
+        if rel_res is not None:
+            due_dt, end_idx = rel_res
+        else:
+            abs_res, end_idx, had_date_without_time = _match_absolute_time(s, now_dt)
+            if had_date_without_time:
+                raise ReminderParseError(SUPPLEMENT_TIME_TIP)
+            if abs_res is None:
+                raise ReminderParseError(USAGE_TIP)
+            due_dt = abs_res
+    except ReminderParseError:
+        raise
+    except (ValueError, OverflowError):
+        raise ReminderParseError(USAGE_TIP)
 
     # 5. 提取事项并清理
     remainder = s[end_idx:].strip()
@@ -385,9 +402,11 @@ def format_error(err: Exception, due_at: Optional[float] = None) -> str:
             return "设置失败：提醒时间至少在 1 分钟之后。"
         if err.kind == "too_far":
             return "设置失败：单次提醒最长支持未来 30 天内。"
+    if isinstance(err, ReminderParseError):
+        return str(err) if str(err) else USAGE_TIP
     if isinstance(err, ReminderError):
         msg = str(err)
         if "提醒事项" in msg:
             return INVALID_CONTENT_TIP
-        return msg
-    return str(err)
+        return msg if msg else USAGE_TIP
+    return USAGE_TIP
