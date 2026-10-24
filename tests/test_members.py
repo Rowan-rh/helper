@@ -318,3 +318,288 @@ class MemberTests(unittest.TestCase):
         self.assertEqual(ctx.reply.call_args.args[1], "用法：/绑定 昵称")
         plugin.on_message(self.message(" /绑定\t成员丙  "), ctx)
         self.assertEqual(self.store.resolve("成员丙").wxid, JING)
+
+
+class AllowAllGroupsTests(unittest.TestCase):
+    def setUp(self):
+        SCRATCH.mkdir(parents=True, exist_ok=True)
+        self.temporary = tempfile.TemporaryDirectory(dir=SCRATCH)
+        self.root = Path(self.temporary.name).resolve()
+        self.config_path = self.root / "members.json"
+        self.stores = []
+
+    def tearDown(self):
+        for store in self.stores:
+            store.close()
+        self.temporary.cleanup()
+
+    def create_store(self, options, account=ROBOT, now=None):
+        self.config_path.write_text(json.dumps(options, ensure_ascii=False), encoding="utf-8")
+        store = MemberStore(self.config_path, account, now=now)
+        self.stores.append(store)
+        return store
+
+    def test_allow_all_groups_config_validation(self):
+        base_options = {
+            "database_file": "data.sqlite3",
+            "groups": {ROOM: []},
+        }
+        for invalid_val in ("true", "false", 1, 0, None, [], {}):
+            opts = dict(base_options, allow_all_groups=invalid_val)
+            with self.assertRaisesRegex(MemberError, "allow_all_groups 必须是布尔值"):
+                self.create_store(opts)
+
+        # 默认缺省为 False
+        store_default = self.create_store(base_options)
+        self.assertFalse(store_default.allow_all_groups)
+        self.assertFalse(store_default.groups.allow_all)
+
+        # 显式 True
+        store_true = self.create_store(dict(base_options, allow_all_groups=True))
+        self.assertTrue(store_true.allow_all_groups)
+        self.assertTrue(store_true.groups.allow_all)
+
+    def test_groupset_behavior(self):
+        from wxbot_framework.members import GroupSet
+
+        # allow_all=False: 严格集合行为
+        gs_false = GroupSet([ROOM], allow_all=False)
+        self.assertIn(ROOM, gs_false)
+        self.assertNotIn("dynamic_room@chatroom", gs_false)
+        self.assertNotIn("wxid_user", gs_false)
+        gs_false.discard(ROOM)
+        self.assertNotIn(ROOM, gs_false)
+
+        # allow_all=True
+        gs_true = GroupSet([ROOM], allow_all=True)
+        self.assertIn(ROOM, gs_true)
+        self.assertIn("dynamic_room@chatroom", gs_true)
+        self.assertIn("any_valid_group123@chatroom", gs_true)
+
+        # 非法群 ID 或私聊非群
+        self.assertNotIn("wxid_user", gs_true)
+        self.assertNotIn("filehelper", gs_true)
+        self.assertNotIn(None, gs_true)
+        self.assertNotIn(12345, gs_true)
+        self.assertNotIn("invalid name with space@chatroom", gs_true)
+        self.assertNotIn("x" * 120 + "@chatroom", gs_true)
+        self.assertNotIn("", gs_true)
+
+        # 集合通用方法
+        self.assertEqual(len(gs_true), 1)
+        self.assertEqual(list(gs_true), [ROOM])
+        gs_copy = gs_true.copy()
+        self.assertTrue(gs_copy.allow_all)
+        self.assertIn("other@chatroom", gs_copy)
+
+    def test_dynamic_group_lifecycle_record_snapshot_personality_clear_rollover(self):
+        fixed_now = [datetime(2026, 10, 24, 12, 0, 0, tzinfo=timezone.utc)]
+        options = {
+            "database_file": "data.sqlite3",
+            "history_enabled": True,
+            "daily_clear": True,
+            "allow_all_groups": True,
+            "groups": {ROOM: []},
+        }
+        store = self.create_store(options, now=lambda: fixed_now[0])
+        store.initialize()
+
+        dynamic_room = "new_dynamic_group@chatroom"
+        user_wxid = "wxid_dynamic_user"
+
+        # 1. 未配置的群不在静态 options["groups"]，但在 store.groups 中
+        self.assertNotIn(dynamic_room, options["groups"])
+        self.assertIn(dynamic_room, store.groups)
+
+        # 2. record 正常写入，自动懒初始化 chat_buffers
+        msg1 = Message("第一句消息", dynamic_room, sender_id=user_wxid, is_group=True,
+                       sequence=1, session_id="sess_1")
+        self.assertTrue(store.record(msg1))
+
+        # 3. conversation_snapshot 正常获取且 state[0] 不为 None
+        conv_snap = store.conversation_snapshot(msg1)
+        self.assertEqual(conv_snap.room, dynamic_room)
+        self.assertEqual(conv_snap.generation, 0)
+        self.assertEqual(conv_snap.current, "第一句消息")
+
+        # 4. today_group_snapshot 正常读取本群今日消息
+        msg2 = Message("第二句消息", dynamic_room, sender_id=user_wxid, is_group=True,
+                       sequence=2, session_id="sess_1")
+        store.record(msg2)
+        group_snap = store.today_group_snapshot(dynamic_room)
+        self.assertEqual(len(group_snap.messages), 2)
+        self.assertEqual(group_snap.generation, 0)
+        self.assertTrue(store.snapshot_is_current(group_snap))
+
+        # 5. 设置群人格
+        store.set_personality(dynamic_room, "嘴臭")
+        p_state = store.personality(dynamic_room)
+        self.assertEqual(p_state.name, "嘴臭")
+        self.assertEqual(p_state.generation, 1)
+
+        # 6. clear 清空消息并递增 generation
+        cleared = store.clear(dynamic_room)
+        self.assertEqual(cleared, 2)
+        group_snap_after_clear = store.today_group_snapshot(dynamic_room)
+        self.assertEqual(len(group_snap_after_clear.messages), 0)
+        self.assertEqual(group_snap_after_clear.generation, 1)
+        self.assertFalse(store.snapshot_is_current(group_snap))
+
+        # 7. rollover 跨天清理覆盖动态群
+        msg3 = Message("清空后的新消息", dynamic_room, sender_id=user_wxid, is_group=True,
+                       sequence=3, session_id="sess_2")
+        store.record(msg3)
+        self.assertEqual(len(store.today_group_snapshot(dynamic_room).messages), 1)
+
+        # 模拟跨天：前进一天
+        fixed_now[0] += timedelta(days=1)
+        self.assertTrue(store.rollover())
+        # daily_clear=True 会清理前一天的消息，且 generation 递增
+        group_snap_next_day = store.today_group_snapshot(dynamic_room)
+        self.assertEqual(len(group_snap_next_day.messages), 0)
+        self.assertEqual(group_snap_next_day.generation, 2)
+
+    def test_mention_chat_and_reminder_in_dynamic_group_and_vip_isolation(self):
+        from plugins.mention_chat import Plugin as MentionChatPlugin
+        from plugins.reminder import Plugin as ReminderPlugin
+        from wxbot_framework.reminders import ReminderStore, prepare_reminder
+        from wxbot_framework.llm import ChatResult
+
+        vip_user = "wxid_vip_boss"
+        normal_user = "wxid_normal_user"
+        dynamic_room = "dynamic_branch_test@chatroom"
+
+        options = {
+            "database_file": "data.sqlite3",
+            "history_enabled": True,
+            "daily_clear": True,
+            "allow_all_groups": True,
+            "agent_vip_wxids": [vip_user],
+            "groups": {ROOM: []},
+        }
+        store = self.create_store(options)
+        store.initialize()
+
+        # VIP 校验
+        self.assertTrue(store.is_vip(vip_user))
+        self.assertFalse(store.is_vip(normal_user))
+
+        # 设置 ServiceFacade 和 MockBackend
+        sent_messages = []
+        backend = Mock()
+        backend.session_id = "test_session"
+
+        def mock_send_text(to_wxid, content, **kw):
+            sent_messages.append(("text", to_wxid, content))
+            return True
+
+        def mock_send_at(room, content, at_list, **kw):
+            sent_messages.append(("at", room, content, at_list))
+            return True
+
+        backend.send_text = Mock(side_effect=mock_send_text)
+        backend.send_at_text = Mock(side_effect=mock_send_at)
+
+        service = ServiceFacade(text_delay={"enabled": False})
+        service.bind(backend)
+
+        # 模拟 LLM
+        fake_llm = Mock()
+        fake_llm.complete_chat.return_value = ChatResult("你好！我是机器人助手。", 10, 10, None)
+        fake_llm.enable_tools = False
+
+        # 初始化 mention_chat
+        chat_plugin = MentionChatPlugin()
+        chat_ctx = PluginContext("mention_chat", {"agent": {}}, service, [], member_store=store)
+        chat_ctx._llm = fake_llm
+        chat_plugin.on_load(chat_ctx)
+        self.addCleanup(lambda: chat_plugin.on_unload(chat_ctx))
+
+        # (a) 普通非 VIP 群成员在动态新群发送 @机器人
+        group_msg = Message(
+            "@机器人\u2005你好", dynamic_room, sender_id=normal_user, is_group=True,
+            sequence=1, session_id="test_session",
+            data={"is_at_self": True, "at_members": (ROBOT,), "self_wxid": ROBOT}
+        )
+        store.record(group_msg)
+        chat_plugin.on_message(group_msg, chat_ctx)
+        self.assertEqual(len(sent_messages), 1)
+        self.assertEqual(sent_messages[0][0], "at")
+        self.assertEqual(sent_messages[0][1], dynamic_room)
+        self.assertIn("你好！我是机器人助手。", sent_messages[0][2])
+        self.assertEqual(sent_messages[0][3], (normal_user,))
+
+        # (b) 普通非 VIP 私聊发送消息 -> 静默忽略，不响应
+        sent_messages.clear()
+        private_msg_normal = Message(
+            "私聊你好", normal_user, sender_id=normal_user, is_group=False,
+            sequence=1, session_id="test_session",
+            data={"self_wxid": ROBOT}
+        )
+        chat_plugin.on_message(private_msg_normal, chat_ctx)
+        self.assertEqual(len(sent_messages), 0)
+
+        # (c) VIP 用户私聊发送消息 -> 正常响应
+        private_msg_vip = Message(
+            "VIP私聊你好", vip_user, sender_id=vip_user, is_group=False,
+            sequence=1, session_id="test_session",
+            data={"self_wxid": ROBOT}
+        )
+        chat_plugin.on_message(private_msg_vip, chat_ctx)
+        self.assertEqual(len(sent_messages), 1)
+        self.assertEqual(sent_messages[0][0], "text")
+        self.assertEqual(sent_messages[0][1], vip_user)
+        self.assertIn("你好！我是机器人助手。", sent_messages[0][2])
+
+        # (d) 动态群中普通非 VIP 发送提醒指令
+        sent_messages.clear()
+        reminder_store = ReminderStore(self.root / ".runtime/reminders.sqlite3", ROBOT, self.root)
+        self.addCleanup(reminder_store.close)
+
+        reminder_ctx = PluginContext("reminder", {}, service, [], member_store=store, reminder_store=reminder_store)
+        base_timestamp = datetime(2026, 10, 24, 15, 0, 0, tzinfo=timezone.utc).timestamp()
+        reminder_plugin = ReminderPlugin(clock=lambda: base_timestamp)
+        reminder_plugin.on_load(reminder_ctx)
+
+        reminder_raw_msg = Message(
+            "@机器人\u200510分钟后提醒我喝水", dynamic_room, sender_id=normal_user, is_group=True,
+            sequence=2, session_id="test_session",
+            data={"is_at_self": True, "at_members": (ROBOT,), "self_wxid": ROBOT}
+        )
+        prepared_msg = prepare_reminder(reminder_raw_msg, store, agent_fallback=True)
+        self.assertTrue(prepared_msg.data.get("reminder_intent"))
+
+        reminder_plugin.on_message(prepared_msg, reminder_ctx)
+        self.assertEqual(len(sent_messages), 1)
+        self.assertEqual(sent_messages[0][0], "text")
+        self.assertEqual(sent_messages[0][1], dynamic_room)
+        self.assertIn("已设置提醒 [#1]", sent_messages[0][2])
+        self.assertIn("喝水", sent_messages[0][2])
+
+    def test_allow_all_groups_false_default_behavior(self):
+        options = {
+            "database_file": "data.sqlite3",
+            "history_enabled": True,
+            "daily_clear": True,
+            "allow_all_groups": False,
+            "groups": {ROOM: []},
+        }
+        store = self.create_store(options)
+        store.initialize()
+
+        dynamic_room = "unknown_group@chatroom"
+        self.assertNotIn(dynamic_room, store.groups)
+
+        msg = Message("新群消息", dynamic_room, sender_id=SMALL, is_group=True, sequence=1, session_id="s1")
+        # 未配置的群不入库
+        self.assertFalse(store.record(msg))
+
+        # 未配置的群快照抛异常
+        with self.assertRaisesRegex(MemberError, "这个群尚未启用聊天记录"):
+            store.today_group_snapshot(dynamic_room)
+
+        with self.assertRaisesRegex(MemberError, "这个群尚未启用聊天记录"):
+            store.clear(dynamic_room)
+
+        with self.assertRaisesRegex(MemberError, "在已启用的群中切换"):
+            store.set_personality(dynamic_room, "嘴臭")

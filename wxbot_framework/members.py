@@ -12,7 +12,7 @@ from pathlib import Path
 
 from .account import validate_account
 from .config import validate_name
-from .text import validate_mentions
+from .text import validate_mentions, validate_target
 
 
 class MemberError(ValueError):
@@ -72,6 +72,30 @@ def name_key(value):
     return value.strip().casefold()
 
 
+class GroupSet(set):
+    """封装群 ID 集合：保留 set 全部行为，当 allow_all=True 时对任意合法群 ID 返回 True。"""
+
+    def __init__(self, iterable=(), allow_all=False):
+        super().__init__(iterable)
+        self.allow_all = bool(allow_all)
+
+    def __contains__(self, item):
+        if super().__contains__(item):
+            return True
+        if not self.allow_all:
+            return False
+        if isinstance(item, str) and item.endswith("@chatroom"):
+            try:
+                validate_target(item)
+                return True
+            except (ValueError, MemberError):
+                return False
+        return False
+
+    def copy(self):
+        return GroupSet(super().copy(), allow_all=self.allow_all)
+
+
 class MemberStore:
     def __init__(self, config_file, account, *, now=None):
         self.account = validate_account(account)
@@ -89,6 +113,9 @@ class MemberStore:
         self.daily_clear = options.get("daily_clear", False)
         if type(self.daily_clear) is not bool:
             raise MemberError("daily_clear 必须是布尔值")
+        self.allow_all_groups = options.get("allow_all_groups", False)
+        if type(self.allow_all_groups) is not bool:
+            raise MemberError("allow_all_groups 必须是布尔值")
         vip_raw = options.get("agent_vip_wxids", [])
         if not isinstance(vip_raw, (list, tuple)):
             raise MemberError("agent_vip_wxids 应为列表")
@@ -100,7 +127,7 @@ class MemberStore:
         self.agent_vip_wxids = frozenset(vip_set)
         self._now = now or (lambda: datetime.now(timezone.utc))
         self._active_day = None
-        self.groups = set(options["groups"])
+        self.groups = GroupSet(options["groups"], allow_all=self.allow_all_groups)
         self.profiles = []
         for room, profiles in options["groups"].items():
             validate_mentions(room, [self.account])
@@ -226,6 +253,14 @@ class MemberStore:
         return (start.date().isoformat(), start.astimezone(timezone.utc).isoformat(),
                 (start + timedelta(days=1)).astimezone(timezone.utc).isoformat())
 
+    def _ensure_buffer(self, db, room, day=None):
+        if day is None:
+            day, _, _ = self._day_bounds()
+        db.execute("""INSERT INTO chat_buffers(account,room,local_day) VALUES(?,?,?)
+            ON CONFLICT(account,room) DO UPDATE SET local_day=excluded.local_day,
+            generation=chat_buffers.generation+1 WHERE chat_buffers.local_day<>excluded.local_day""",
+            (self.account, room, day))
+
     def rollover(self):
         """即使没有新消息也可调用；停机期间跨天则在启动时补清理。"""
         with self._lock:
@@ -233,11 +268,14 @@ class MemberStore:
             if day == self._active_day:
                 return False
             with self._connection() as db:
-                for room in self.groups:
-                    db.execute("""INSERT INTO chat_buffers(account,room,local_day) VALUES(?,?,?)
-                        ON CONFLICT(account,room) DO UPDATE SET local_day=excluded.local_day,
-                        generation=chat_buffers.generation+1 WHERE chat_buffers.local_day<>excluded.local_day""",
-                               (self.account, room, day))
+                rooms = set(self.groups)
+                rows = db.execute(
+                    "SELECT DISTINCT room FROM chat_buffers WHERE account=? "
+                    "UNION SELECT DISTINCT room FROM messages WHERE account=?",
+                    (self.account, self.account)).fetchall()
+                rooms.update(row[0] for row in rows)
+                for room in rooms:
+                    self._ensure_buffer(db, room, day)
                     if self.daily_clear:
                         db.execute("DELETE FROM messages WHERE account=? AND room=? AND received_at<?",
                                    (self.account, room, start))
@@ -249,7 +287,9 @@ class MemberStore:
             raise MemberError("这个群尚未启用聊天记录")
         with self._lock:
             self.rollover()
+            day, _, _ = self._day_bounds()
             with self._connection() as db:
+                self._ensure_buffer(db, room, day)
                 count = db.execute("DELETE FROM messages WHERE account=? AND room=?", (self.account, room)).rowcount
                 db.execute("UPDATE chat_buffers SET generation=generation+1 WHERE account=? AND room=?",
                            (self.account, room))
@@ -260,17 +300,21 @@ class MemberStore:
         with self._lock:
             self.rollover()
             member = self.resolve(name, room)
+            if member.room not in self.groups:
+                raise MemberError("这个群尚未启用聊天记录")
             if member.wxid is None:
                 raise MemberError(f"{member.name} 尚未绑定微信 ID")
             day, start, end = self._day_bounds()
             db = self._connection()
+            with db:
+                self._ensure_buffer(db, member.room, day)
             state = db.execute("SELECT generation FROM chat_buffers WHERE account=? AND room=?",
-                               (self.account, room)).fetchone()
+                               (self.account, member.room)).fetchone()
             if state is None:
                 raise MemberError("这个群尚未启用聊天记录")
             rows = db.execute("""SELECT * FROM messages WHERE account=? AND room=? AND sender_id=?
                 AND received_at>=? AND received_at<? AND bot_generated=0 ORDER BY id""",
-                              (self.account, room, member.wxid, start, end)).fetchall()
+                              (self.account, member.room, member.wxid, start, end)).fetchall()
             return ChatSnapshot(member, day, state[0], tuple(dict(row) for row in rows))
 
     def today_group_snapshot(self, room):
@@ -281,6 +325,8 @@ class MemberStore:
             self.rollover()
             day, start, end = self._day_bounds()
             db = self._connection()
+            with db:
+                self._ensure_buffer(db, room, day)
             state = db.execute("SELECT generation FROM chat_buffers WHERE account=? AND room=?",
                                (self.account, room)).fetchone()
             rows = db.execute("""SELECT m.*, p.name AS speaker_name FROM messages m
@@ -365,6 +411,11 @@ class MemberStore:
             member = self.find_by_wxid(message.sender_id, message.chat_id)
             state = db.execute("SELECT generation FROM chat_buffers WHERE account=? AND room=?",
                                (self.account, message.chat_id)).fetchone()
+            if state is None:
+                with db:
+                    self._ensure_buffer(db, message.chat_id, day)
+                state = db.execute("SELECT generation FROM chat_buffers WHERE account=? AND room=?",
+                                   (self.account, message.chat_id)).fetchone()
             return ConversationSnapshot(message.chat_id, day, state[0], member.name if member else
                                         self.wechat_name(message.sender_id) or "群友",
                                         tuple(reversed(previous)), message.text)
@@ -515,16 +566,19 @@ class MemberStore:
         native_name = message.data.get("sender_wechat_name")
         if native_name:
             self.remember_wechat_name(message.sender_id, native_name)
-        with self._lock, self._connection() as db:
+        with self._lock:
             self.rollover()
-            db.execute("INSERT OR IGNORE INTO room_members VALUES(?,?,?)",
-                       (self.account, message.chat_id, message.sender_id))
-            result = db.execute("""INSERT OR IGNORE INTO messages
-                (account,room,sender_id,text,received_at,session_id,sequence,is_self,bot_generated) VALUES(?,?,?,?,?,?,?,?,?)""",
-                (self.account, message.chat_id, message.sender_id, message.text,
-                 self._now().astimezone(timezone.utc).isoformat(), message.session_id, message.sequence,
-                 int(message.is_self), int(bool(message.data.get("bot_generated")))))
-            return result.rowcount > 0
+            day, _, _ = self._day_bounds()
+            with self._connection() as db:
+                self._ensure_buffer(db, message.chat_id, day)
+                db.execute("INSERT OR IGNORE INTO room_members VALUES(?,?,?)",
+                           (self.account, message.chat_id, message.sender_id))
+                result = db.execute("""INSERT OR IGNORE INTO messages
+                    (account,room,sender_id,text,received_at,session_id,sequence,is_self,bot_generated) VALUES(?,?,?,?,?,?,?,?,?)""",
+                    (self.account, message.chat_id, message.sender_id, message.text,
+                     self._now().astimezone(timezone.utc).isoformat(), message.session_id, message.sequence,
+                     int(message.is_self), int(bool(message.data.get("bot_generated")))))
+                return result.rowcount > 0
 
     def history(self, name, room=None, *, limit=100, since=None):
         if type(limit) is not int or not 1 <= limit <= 1000:
