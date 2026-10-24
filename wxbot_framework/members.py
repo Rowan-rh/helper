@@ -84,7 +84,7 @@ class GroupSet(set):
             return True
         if not self.allow_all:
             return False
-        if isinstance(item, str) and item.endswith("@chatroom"):
+        if isinstance(item, str) and len(item) > len("@chatroom") and item.endswith("@chatroom"):
             try:
                 validate_target(item)
                 return True

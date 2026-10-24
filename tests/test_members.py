@@ -324,18 +324,22 @@ class AllowAllGroupsTests(unittest.TestCase):
     def setUp(self):
         SCRATCH.mkdir(parents=True, exist_ok=True)
         self.temporary = tempfile.TemporaryDirectory(dir=SCRATCH)
+        # addCleanup 后进先出：临时目录最先注册，最后删除，sqlite 句柄一定先关闭。
+        self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name).resolve()
         self.config_path = self.root / "members.json"
         self.stores = []
 
     def tearDown(self):
-        for store in self.stores:
-            store.close()
-        self.temporary.cleanup()
+        # 递归清理只针对本测试创建、已核对位于工作区的临时目录。
+        self.assertTrue(self.root.resolve().is_relative_to(SCRATCH.resolve()))
+        # 临时目录删除与成员目录句柄关闭由 addCleanup 统一处理（后进先出）。
 
     def create_store(self, options, account=ROBOT, now=None):
         self.config_path.write_text(json.dumps(options, ensure_ascii=False), encoding="utf-8")
         store = MemberStore(self.config_path, account, now=now)
+        # 句柄关闭必须早于临时目录删除，否则 Windows 上删目录会报 WinError 32。
+        self.addCleanup(store.close)
         self.stores.append(store)
         return store
 
@@ -384,6 +388,7 @@ class AllowAllGroupsTests(unittest.TestCase):
         self.assertNotIn("invalid name with space@chatroom", gs_true)
         self.assertNotIn("x" * 120 + "@chatroom", gs_true)
         self.assertNotIn("", gs_true)
+        self.assertNotIn("@chatroom", gs_true)
 
         # 集合通用方法
         self.assertEqual(len(gs_true), 1)
@@ -575,6 +580,36 @@ class AllowAllGroupsTests(unittest.TestCase):
         self.assertEqual(sent_messages[0][1], dynamic_room)
         self.assertIn("已设置提醒 [#1]", sent_messages[0][2])
         self.assertIn("喝水", sent_messages[0][2])
+
+    def test_allow_all_groups_empty_groups_config_lifecycle(self):
+        # 覆盖最典型的默认配置：groups 为空字典 {}，搭配 allow_all_groups: true
+        fixed_now = [datetime(2026, 10, 24, 10, 0, 0, tzinfo=timezone.utc)]
+        options = {
+            "database_file": "data.sqlite3",
+            "history_enabled": True,
+            "daily_clear": True,
+            "allow_all_groups": True,
+            "groups": {},
+        }
+        store = self.create_store(options, now=lambda: fixed_now[0])
+        store.initialize()
+
+        self.assertEqual(len(store.groups), 0)
+        dynamic_room = "empty_cfg_room@chatroom"
+        self.assertIn(dynamic_room, store.groups)
+
+        msg = Message("空配置测试消息", dynamic_room, sender_id="wxid_user_1", is_group=True, sequence=1, session_id="s1")
+        self.assertTrue(store.record(msg))
+        snap = store.today_group_snapshot(dynamic_room)
+        self.assertEqual(len(snap.messages), 1)
+        self.assertEqual(snap.generation, 0)
+
+        # 跨天 rollover 正常清理
+        fixed_now[0] += timedelta(days=1)
+        self.assertTrue(store.rollover())
+        snap_next = store.today_group_snapshot(dynamic_room)
+        self.assertEqual(len(snap_next.messages), 0)
+        self.assertEqual(snap_next.generation, 1)
 
     def test_allow_all_groups_false_default_behavior(self):
         options = {
