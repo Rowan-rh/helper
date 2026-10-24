@@ -178,12 +178,8 @@ class BotApplication:
             while not self.stop_event.is_set():
                 now = time.monotonic()
                 if self.members is not None and now >= next_rollover:
+                    self.members.rollover()
                     next_rollover = now + 0.5
-                    try:
-                        self.members.rollover()
-                    except Exception:
-                        # 跨天清理失败不终止框架，记录后下个周期重试。
-                        logger.exception("群文本滚动清理失败")
                 if self.scheduler is not None:
                     self.scheduler.restart_if_dead()
                 if seconds and now - started >= seconds:
