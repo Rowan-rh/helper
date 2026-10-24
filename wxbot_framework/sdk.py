@@ -20,6 +20,25 @@ class CapabilityError(NotImplementedError):
     pass
 
 
+class SendNotAttempted(RuntimeError):
+    """尚未调用到原生发送就失败（未连接、旧会话、发送被取消），可以安全重试。"""
+
+
+def mention_display_name(members, wxid, room, display_name=None):
+    """群艾特显示名：本群绑定称呼优先，其次微信名；都没有时返回 None。
+
+    传入 display_name 时，只有成员自己 /绑定 的称呼才覆盖它。
+    """
+    if members is None:
+        return display_name
+    member = members.find_by_wxid(wxid, room)
+    if member is not None and (display_name is None or member.self_named):
+        return member.display_name
+    if display_name is None:
+        return members.wechat_name(wxid)
+    return display_name
+
+
 @dataclass(frozen=True)
 class Message:
     text: str
@@ -82,9 +101,9 @@ class ServiceFacade:
             raise ValueError("文本应为 1–1023 个 UTF-8 字节，且不能包含 NUL")
         with self._lock:
             if self._backend is None or not self._available:
-                raise RuntimeError("微信尚未连接")
+                raise SendNotAttempted("微信尚未连接")
             if expected_session and expected_session != self._backend.session_id:
-                raise RuntimeError("消息所属的微信连接已结束，跳过旧会话回复")
+                raise SendNotAttempted("消息所属的微信连接已结束，跳过旧会话回复")
             if _mentions and not callable(getattr(self._backend, "send_at_text", None)):
                 raise CapabilityError("当前后端尚未开放真实群艾特")
             backend, cancel = self._backend, self._cancel
@@ -96,7 +115,7 @@ class ServiceFacade:
             seconds = self.text_delay.seconds_for(content)
             logger.debug("文本发送等待 %.3f 秒（%d 个字符）", seconds, len(content))
             if cancel.wait(seconds):
-                raise RuntimeError("微信连接已结束，取消待发送文本")
+                raise SendNotAttempted("微信连接已结束，取消待发送文本")
             with self._lock:
                 self._check_pending(backend, cancel)
                 # 在文本节奏等待之后检查记录版本，清空后不发送旧总结。
@@ -121,7 +140,7 @@ class ServiceFacade:
 
     def _check_pending(self, backend, cancel):
         if cancel.is_set() or not self._available or self._backend is not backend or self._cancel is not cancel:
-            raise RuntimeError("微信连接已结束，取消待发送文本")
+            raise SendNotAttempted("微信连接已结束，取消待发送文本")
 
     def cancel_pending(self):
         with self._lock:
@@ -157,7 +176,8 @@ class LegacyService:
 
 
 class PluginContext:
-    def __init__(self, name, options, service, capabilities, *, llm_config_path=None, member_store=None):
+    def __init__(self, name, options, service, capabilities, *, llm_config_path=None, member_store=None,
+                 reminder_store=None, plugin_active_check=None):
         self.name = name
         self.config = MappingProxyType(copy.deepcopy(options))
         self.logger = logging.getLogger(f"Plugin.{name}")
@@ -166,12 +186,27 @@ class PluginContext:
         self._llm_config_path = llm_config_path
         self._llm = None
         self._members = member_store
+        self._reminders = reminder_store
+        self._plugin_active_check = plugin_active_check
+
+    def is_plugin_active(self, name):
+        """检查指定插件当前是否处于启用运行状态（未接入管理器时默认视为启用）。"""
+        if self._plugin_active_check is None:
+            return True
+        return bool(self._plugin_active_check(name))
 
     @property
     def members(self):
         if self._members is None:
             raise CapabilityError("尚未配置框架成员目录")
         return self._members
+
+    @property
+    def reminders(self):
+        """提醒的增、查、取消；到点发送由框架调度器负责，插件不自开线程。"""
+        if self._reminders is None:
+            raise CapabilityError("尚未配置框架提醒存储（需要成员目录与 wechat_account）")
+        return self._reminders
 
     @property
     def llm(self):
@@ -210,12 +245,7 @@ class PluginContext:
     def reply_at(self, message, text, *, display_name=None, delivery_guard=None):
         if not message.is_group:
             raise ValueError("reply_at 仅用于群消息")
-        if self._members is not None:
-            member = self._members.find_by_wxid(message.sender_id, message.chat_id)
-            if member is not None and (display_name is None or member.self_named):
-                display_name = member.display_name
-            elif display_name is None:
-                display_name = self._members.wechat_name(message.sender_id)
+        display_name = mention_display_name(self._members, message.sender_id, message.chat_id, display_name)
         return self._service.send_at_text(message.chat_id, text, [message.sender_id],
                                          expected_session=message.session_id,
                                          display_names=[display_name] if display_name is not None else None,
