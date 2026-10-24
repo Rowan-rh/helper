@@ -1,0 +1,10 @@
+{
+  "api": "v1",
+  "description": "群聊定时提醒：@机器人设置提醒，到点自动 @ 用户",
+  "requires": [
+    "text.receive",
+    "group.text.receive",
+    "group.text.send",
+    "group.text.mention"
+  ]
+}
