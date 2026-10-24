@@ -104,6 +104,15 @@ class ReminderParserTestCase(unittest.TestCase):
             ("明天9点一定交报告", datetime(2026, 10, 25, 9, 0, 0, tzinfo=BEIJING), "一定交报告"),
             ("明天9点30 开会", datetime(2026, 10, 25, 9, 30, 0, tzinfo=BEIJING), "开会"),
             ("明天9点30分 开会", datetime(2026, 10, 25, 9, 30, 0, tzinfo=BEIJING), "开会"),
+            ("明天九点三十开会", datetime(2026, 10, 25, 9, 30, 0, tzinfo=BEIJING), "开会"),
+            ("明天九点十五开会", datetime(2026, 10, 25, 9, 15, 0, tzinfo=BEIJING), "开会"),
+            ("明天9点5开会", datetime(2026, 10, 25, 9, 5, 0, tzinfo=BEIJING), "开会"),
+            ("明天九点零五开会", datetime(2026, 10, 25, 9, 5, 0, tzinfo=BEIJING), "开会"),
+            ("明天九点零五分开会", datetime(2026, 10, 25, 9, 5, 0, tzinfo=BEIJING), "开会"),
+            ("明天九点十开会", datetime(2026, 10, 25, 9, 10, 0, tzinfo=BEIJING), "开会"),
+            ("明天九点十分开会", datetime(2026, 10, 25, 9, 10, 0, tzinfo=BEIJING), "开会"),
+            ("明天九点四十五开会", datetime(2026, 10, 25, 9, 45, 0, tzinfo=BEIJING), "开会"),
+            ("明天4点两个人开会", datetime(2026, 10, 25, 4, 0, 0, tzinfo=BEIJING), "两个人开会"),
             ("明天9点提醒我检查每一个文件", datetime(2026, 10, 25, 9, 0, 0, tzinfo=BEIJING), "检查每一个文件"),
             ("晚上12点 睡觉", datetime(2026, 10, 25, 0, 0, 0, tzinfo=BEIJING), "睡觉"),
             ("今晚12点 睡觉", datetime(2026, 10, 25, 0, 0, 0, tzinfo=BEIJING), "睡觉"),
@@ -210,6 +219,19 @@ class ReminderParserTestCase(unittest.TestCase):
         # 8. 非法中文数字异常拦截并转换为用法提示，不泄露内部描述
         with self.assertRaises(ReminderParseError) as cm:
             parse("@机器人 一二三分钟后提醒我喝水", BASE_NOW)
+        self.assertIn("未识别到有效的提醒时间或事项", str(cm.exception))
+
+        # 9. 「点」后紧跟3位及以上数字或非法分钟拦截并返回用法提示
+        with self.assertRaises(ReminderParseError) as cm:
+            parse("@机器人 明天9点300开会", BASE_NOW)
+        self.assertIn("未识别到有效的提醒时间或事项", str(cm.exception))
+
+        with self.assertRaises(ReminderParseError) as cm:
+            parse("/提醒 9点300 开会", BASE_NOW)
+        self.assertIn("未识别到有效的提醒时间或事项", str(cm.exception))
+
+        with self.assertRaises(ReminderParseError) as cm:
+            parse("@机器人 明天9点65开会", BASE_NOW)
         self.assertIn("未识别到有效的提醒时间或事项", str(cm.exception))
 
 

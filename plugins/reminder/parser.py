@@ -100,9 +100,11 @@ RE_PERIOD = re.compile(
 RE_TIME = re.compile(
     r"^(?:"
     r"(?P<h_colon>\d{1,2}):(?P<m_colon>\d{2})|"
-    r"(?P<h_min_fen>\d{1,2}|[一二两三四五六七八九十]+)\s*点\s*(?P<m_min_fen>\d{1,2}|[一二两三四五六七八九十]+)\s*分(?:钟)?|"
-    r"(?P<h_min_num>\d{1,2}|[一二两三四五六七八九十]+)\s*点\s*(?P<m_min_num>\d{2})(?!\d)|"
+    r"(?P<h_min_fen>\d{1,2}|[一二两三四五六七八九十]+)\s*点\s*(?P<m_min_fen>\d{1,2}|[零一二两三四五六七八九十]+)\s*分(?:钟)?|"
     r"(?P<h_half>\d{1,2}|[一二两三四五六七八九十]+)\s*点半|"
+    r"(?P<h_min_zh>\d{1,2}|[一二两三四五六七八九十]+)\s*点\s*(?P<m_min_zh>(?:[一二两三四五六七八九]?十[一二两三四五六七八九]?|零[一二两三四五六七八九]))|"
+    r"(?P<h_min_num>\d{1,2}|[一二两三四五六七八九十]+)\s*点\s*(?P<m_min_num>\d{1,2})(?!\d)|"
+    r"(?P<h_invalid_num>\d{1,2}|[一二两三四五六七八九十]+)\s*点\s*(?P<m_invalid_num>\d{3,})|"
     r"(?P<h_whole>\d{1,2}|[一二两三四五六七八九十]+)\s*点(?:整)?|"
     r"(?P<h_shi>\d{1,2})\s*时\s*(?P<m_shi>\d{1,2})\s*分?"
     r")"
@@ -218,12 +220,17 @@ def _match_absolute_time(s: str, now_dt: datetime) -> tuple[Optional[datetime], 
     elif m_time.group("h_min_fen"):
         hour = parse_zh_int(m_time.group("h_min_fen"))
         minute = parse_zh_int(m_time.group("m_min_fen"))
-    elif m_time.group("h_min_num"):
-        hour = parse_zh_int(m_time.group("h_min_num"))
-        minute = int(m_time.group("m_min_num"))
     elif m_time.group("h_half"):
         hour = parse_zh_int(m_time.group("h_half"))
         minute = 30
+    elif m_time.group("h_min_zh"):
+        hour = parse_zh_int(m_time.group("h_min_zh"))
+        minute = parse_zh_int(m_time.group("m_min_zh"))
+    elif m_time.group("h_min_num"):
+        hour = parse_zh_int(m_time.group("h_min_num"))
+        minute = int(m_time.group("m_min_num"))
+    elif m_time.group("m_invalid_num"):
+        return None, 0, False
     elif m_time.group("h_whole"):
         hour = parse_zh_int(m_time.group("h_whole"))
         minute = 0
