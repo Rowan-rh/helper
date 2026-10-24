@@ -177,7 +177,7 @@ class LegacyService:
 
 class PluginContext:
     def __init__(self, name, options, service, capabilities, *, llm_config_path=None, member_store=None,
-                 reminder_store=None, plugin_active_check=None):
+                 reminder_store=None, mcp_manager=None, plugin_active_check=None):
         self.name = name
         self.config = MappingProxyType(copy.deepcopy(options))
         self.logger = logging.getLogger(f"Plugin.{name}")
@@ -187,6 +187,7 @@ class PluginContext:
         self._llm = None
         self._members = member_store
         self._reminders = reminder_store
+        self._mcp = mcp_manager
         self._plugin_active_check = plugin_active_check
 
     def is_plugin_active(self, name):
@@ -194,6 +195,11 @@ class PluginContext:
         if self._plugin_active_check is None:
             return True
         return bool(self._plugin_active_check(name))
+
+    @property
+    def mcp(self):
+        """外部 MCP 与内置网页搜索管理器（未注入时为 None）。"""
+        return self._mcp
 
     @property
     def members(self):

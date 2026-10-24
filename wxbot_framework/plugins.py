@@ -108,7 +108,7 @@ class PluginRecord:
 
 class PluginManager:
     def __init__(self, directory, store, service, capabilities, queue_size=128, *, member_store=None,
-                 reminder_store=None):
+                 reminder_store=None, mcp_manager=None):
         self.directory = Path(directory).resolve()
         self.store, self.service = store, service
         self.capabilities = frozenset(capabilities)
@@ -119,6 +119,17 @@ class PluginManager:
         self.config = store.load()
         self.member_store = member_store
         self.reminder_store = reminder_store
+        self.mcp = mcp_manager
+
+    def _read_mcp_config(self):
+        from .mcp_client import MCPConfig, MCPConfigError
+
+        mcp_file = self.config.get("mcp_config_file", "mcp_config.json")
+        if mcp_file is None or mcp_file == "":
+            return MCPConfig(enabled=False)
+        if not isinstance(mcp_file, str):
+            raise MCPConfigError("mcp_config_file 必须是字符串或 null")
+        return MCPConfig.from_file(self.store.path.parent / mcp_file)
 
     def is_active(self, name):
         with self._lock:
@@ -157,7 +168,7 @@ class PluginManager:
         context = PluginContext(spec.name, options, self.service, self.capabilities,
                                 llm_config_path=self.store.path.parent / self.config.get("llm_config_file", "llm_config.json"),
                                 member_store=self.member_store, reminder_store=self.reminder_store,
-                                plugin_active_check=self.is_active)
+                                mcp_manager=self.mcp, plugin_active_check=self.is_active)
         # 每次使用独立模块名并重新编译源文件，热重载不复用旧入口字节码。
         if "_wxbot_plugins" not in sys.modules:
             package = types.ModuleType("_wxbot_plugins")
@@ -220,17 +231,28 @@ class PluginManager:
                 except Exception:
                     # 回调已停止，明确报告配置保存错误；不会重新启动半关闭实例。
                     self.records.pop(name, None)
+                    if name == "mention_chat" and self.mcp is not None:
+                        self.mcp.close()
                     raise
             self.records.pop(name, None)
         if record is not None:
             record.join()
+        if name == "mention_chat" and self.mcp is not None:
+            self.mcp.close()
         logger.info("已停用插件：%s", name)
 
     def enable(self, name):
         if name not in self.discover():
             raise ValueError(f"未找到插件：{name}")
         self.config = self.store.set_enabled(name, True)
-        self.load_one(name)
+        if name == "mention_chat" and self.mcp is not None:
+            self.mcp.reload(self._read_mcp_config())
+        try:
+            self.load_one(name)
+        except BaseException:
+            if name == "mention_chat" and self.mcp is not None and not self.is_active("mention_chat"):
+                self.mcp.close()
+            raise
 
     def reload(self, name=None):
         self.config = self.store.load()
@@ -239,14 +261,27 @@ class PluginManager:
             validate_name(name)
             if name not in specs and name not in self.records:
                 raise ValueError(f"未找到插件：{name}")
+        mcp_reload_failed = False
+        if self.mcp is not None and (name is None or name == "mention_chat"):
+            try:
+                self.mcp.reload(self._read_mcp_config())
+            except (Exception, SystemExit) as error:
+                mcp_reload_failed = True
+                self.mcp.close()
+                self.load_errors["mention_chat"] = str(error)
+                logger.exception("MCP 配置重载失败，mention_chat 相关外部工具已停用")
         targets = [name] if name else sorted(set(specs) | set(self.records))
         for target in targets:
             try:
                 if target not in specs or not self.config.get("plugins", {}).get(target, {}).get("enabled", True):
                     self.disable(target, persist=False)
+                elif target == "mention_chat" and mcp_reload_failed:
+                    self.disable(target, persist=False)
                 else:
                     self.load_one(target)
             except (Exception, SystemExit) as error:
+                if target == "mention_chat" and self.mcp is not None and not self.is_active("mention_chat"):
+                    self.mcp.close()
                 self.load_errors[target] = str(error)
                 logger.exception("插件 %s 加载失败，其他插件继续运行", target)
 
