@@ -16,7 +16,7 @@ from pathlib import Path
 from unittest import mock
 
 from wxbot_framework.mcp_client import (
-     CircuitBreaker,
+    CircuitBreaker,
     MCPConfig,
     MCPConfigError,
     MCPError,

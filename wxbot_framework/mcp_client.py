@@ -17,12 +17,10 @@ import json
 import logging
 import math
 import os
-import queue
 import re
 import shutil
 import signal
 import subprocess
-import sys
 import threading
 import time
 import unicodedata
